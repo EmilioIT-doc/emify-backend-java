@@ -1,0 +1,50 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://postgresql:5432/emify
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres123}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+    defer-datasource-initialization: false
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+    url: jdbc:postgresql://postgresql:5432/emify
+    user: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres123}
+
+  security:
+    jwt:
+      secret: ${JWT_SECRET:emify-super-secret-key-para-jwt-2026-cambiar-en-produccion}
+      expiration: 86400000
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+    consumer:
+      group-id: emify-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      properties:
+        spring.json.trusted.packages: "*"
+
+server:
+  port: 8080
+
+logging:
+  level:
+    org.springframework.security: WARN
+    com.emify: INFO
