@@ -37,6 +37,9 @@ public class KafkaConfig {
         config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, JsonSerializer.class);
         config.put(JsonSerializer.ADD_TYPE_INFO_HEADERS, false);
+        config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 3000);
+        config.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, 3000);
+        config.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, 5000);
 
         DefaultKafkaProducerFactory<String, AppointmentEvent> factory =
                 new DefaultKafkaProducerFactory<>(config);
