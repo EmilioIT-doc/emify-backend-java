@@ -266,8 +266,12 @@ public class BookingService {
                 .eventTimestamp(LocalDateTime.now())
                 .build();
 
-        kafkaProducerService.publishAppointmentEvent(
-                KafkaProducerService.TOPIC_APPOINTMENT_CREATED, event);
+        try {
+            kafkaProducerService.publishAppointmentEvent(
+                    KafkaProducerService.TOPIC_APPOINTMENT_CREATED, event);
+        } catch (Exception e) {
+            log.warn("⚠️ Kafka no disponible: {}", e.getMessage());
+        }
 
         // TODO: WhatsApp notifications (UltraMsg) — se activan en producción
         log.info("📅 Cita creada: {} - {} - {}", name, startTime, service.getName());
@@ -343,8 +347,12 @@ public class BookingService {
                 .eventTimestamp(LocalDateTime.now())
                 .build();
 
-        kafkaProducerService.publishAppointmentEvent(
-                KafkaProducerService.TOPIC_APPOINTMENT_CANCELLED, cancelEvent);
+        try {
+            kafkaProducerService.publishAppointmentEvent(
+                    KafkaProducerService.TOPIC_APPOINTMENT_CANCELLED, cancelEvent);
+        } catch (Exception e) {
+            log.warn("⚠️ Kafka no disponible: {}", e.getMessage());
+        }
 
         log.info("❌ Cita cancelada: token={}", token);
 
