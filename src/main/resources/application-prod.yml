@@ -33,6 +33,10 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        max.block.ms: 3000          # ← timeout de 3 segundos
+        request.timeout.ms: 3000
+        delivery.timeout.ms: 5000
     consumer:
       group-id: emify-group
       auto-offset-reset: earliest
