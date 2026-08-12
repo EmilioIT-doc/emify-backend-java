@@ -10,4 +10,5 @@ import java.util.Optional;
 public interface BarbershopStaffRepository extends JpaRepository<BarbershopStaff, Long> {
     List<BarbershopStaff> findByLocationIdAndIsActiveTrue(Long locationId);
     Optional<BarbershopStaff> findByUserIdAndLocationId(Long userId, Long locationId);
+    Optional<BarbershopStaff> findFirstByUserIdAndIsActiveTrue(Long userId);
 }

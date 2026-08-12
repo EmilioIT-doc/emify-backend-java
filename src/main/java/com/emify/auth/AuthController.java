@@ -64,6 +64,34 @@ public class AuthController {
         return ResponseEntity.ok(response);
     }
 
+    // GET /api/auth/me  (protegido) — perfil del usuario logeado
+    @GetMapping("/me")
+    public ResponseEntity<ApiResponse<?>> me(Authentication authentication) {
+        if (authentication == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.fail("No autenticado"));
+        }
+        ApiResponse<?> response = authService.getMe(authentication.getName());
+        return ResponseEntity.ok(response);
+    }
+
+    // POST /api/auth/updateProfile  (protegido) — nombre, teléfono, avatar. El email nunca se toca.
+    @PostMapping("/updateProfile")
+    public ResponseEntity<ApiResponse<?>> updateProfile(
+            @Valid @RequestBody UpdateProfileRequest request,
+            Authentication authentication) {
+
+        if (authentication == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.fail("No autenticado"));
+        }
+
+        ApiResponse<?> response = authService.updateProfile(authentication.getName(), request);
+
+        if (!response.isStatus()) {
+            return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(response);
+        }
+        return ResponseEntity.ok(response);
+    }
+
     // POST /api/auth/googleAuth  (stub — sin servicio externo)
     @PostMapping("/googleAuth")
     public ResponseEntity<ApiResponse<?>> googleAuth() {

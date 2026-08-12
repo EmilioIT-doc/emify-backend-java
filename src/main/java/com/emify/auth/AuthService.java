@@ -1,6 +1,13 @@
 package com.emify.auth;
 
 import com.emify.auth.dto.*;
+import com.emify.barbershop.Barbershop;
+import com.emify.barbershop.BarbershopLocation;
+import com.emify.barbershop.BarbershopRepository;
+import com.emify.barbershop.BarbershopStaff;
+import com.emify.barbershop.BarbershopStaffRepository;
+import com.emify.restaurant.Restaurant;
+import com.emify.restaurant.RestaurantRepository;
 import com.emify.security.JwtUtil;
 import com.emify.user.User;
 import com.emify.user.UserRepository;
@@ -13,6 +20,7 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -23,6 +31,9 @@ import java.util.Random;
 public class AuthService {
 
     private final UserRepository userRepository;
+    private final BarbershopRepository barbershopRepository;
+    private final BarbershopStaffRepository barbershopStaffRepository;
+    private final RestaurantRepository restaurantRepository;
     private final EmailVerificationCodeRepository verificationCodeRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
@@ -141,13 +152,14 @@ public class AuthService {
 
         String token = generateToken(user);
 
-        return ApiResponse.ok("Autenticación exitosa", Map.of(
-                "token", token,
-                "barbershop_id", "", // TODO: buscar barbershop del owner
-                "role", user.getRole().name(),
-                "location", "",      // TODO: buscar location del staff
-                "user", buildUserMap(user)
-        ));
+        Map<String, Object> response = new HashMap<>();
+        response.put("token", token);
+        response.put("role", user.getRole().name());
+        response.put("business", buildBusinessMap(user));
+        response.put("staff_location", buildStaffLocationMap(user));
+        response.put("user", buildUserMap(user));
+
+        return ApiResponse.ok("Autenticación exitosa", response);
     }
 
     // -------------------------------------------------------
@@ -166,8 +178,82 @@ public class AuthService {
     }
 
     // -------------------------------------------------------
+    // GET ME (perfil del usuario logeado)
+    // -------------------------------------------------------
+    public ApiResponse<?> getMe(String email) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("Usuario no encontrado"));
+
+        Map<String, Object> userMap = new HashMap<>(buildUserMap(user));
+        userMap.put("business", buildBusinessMap(user));
+        userMap.put("staff_location", buildStaffLocationMap(user));
+
+        return ApiResponse.ok("Perfil obtenido", userMap);
+    }
+
+    // -------------------------------------------------------
+    // UPDATE PROFILE (nombre, teléfono, avatar — el email nunca se toca)
+    // -------------------------------------------------------
+    public ApiResponse<?> updateProfile(String email, UpdateProfileRequest request) {
+        User user = userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("Usuario no encontrado"));
+
+        if (request.getAvatarUrl() != null && !request.getAvatarUrl().isBlank()) {
+            if (!AVATARS.contains(request.getAvatarUrl())) {
+                return ApiResponse.fail("Avatar inválido");
+            }
+            user.setAvatarUrl(request.getAvatarUrl());
+        }
+
+        user.setName(request.getName());
+        user.setPhone(request.getPhone());
+        userRepository.save(user);
+
+        Map<String, Object> userMap = new HashMap<>(buildUserMap(user));
+        userMap.put("business", buildBusinessMap(user));
+        userMap.put("staff_location", buildStaffLocationMap(user));
+
+        return ApiResponse.ok("Perfil actualizado", userMap);
+    }
+
+    // -------------------------------------------------------
     // HELPERS
     // -------------------------------------------------------
+    private Map<String, Object> buildBusinessMap(User user) {
+        Barbershop barbershop = barbershopRepository.findByOwnerId(user.getId()).orElse(null);
+        if (barbershop != null) {
+            return Map.of(
+                    "id", barbershop.getId(),
+                    "name", barbershop.getName(),
+                    "rubro", "barbershop"
+            );
+        }
+
+        Restaurant restaurant = restaurantRepository.findByOwnerId(user.getId()).orElse(null);
+        if (restaurant != null) {
+            return Map.of(
+                    "id", restaurant.getId(),
+                    "name", restaurant.getName(),
+                    "rubro", "restaurant"
+            );
+        }
+
+        return null;
+    }
+
+    // Ubicación donde trabaja el usuario como staff (role = barber), si tiene alguna asignada.
+    private Map<String, Object> buildStaffLocationMap(User user) {
+        BarbershopStaff staff = barbershopStaffRepository.findFirstByUserIdAndIsActiveTrue(user.getId()).orElse(null);
+        if (staff == null) return null;
+
+        BarbershopLocation location = staff.getLocation();
+        return Map.of(
+                "id", location.getId(),
+                "name", location.getName(),
+                "barbershop_id", location.getBarbershop().getId()
+        );
+    }
+
     private String generateToken(User user) {
         Map<String, Object> claims = Map.of(
                 "role", user.getRole().name(),

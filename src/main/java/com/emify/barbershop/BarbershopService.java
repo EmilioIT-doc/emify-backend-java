@@ -2,6 +2,7 @@ package com.emify.barbershop;
 
 import com.emify.auth.dto.ApiResponse;
 import com.emify.user.User;
+import com.emify.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +19,7 @@ public class BarbershopService {
     private final BarbershopLocationRepository locationRepository;
     private final ServiceRepository serviceRepository;
     private final AvailabilityRepository availabilityRepository;
+    private final UserRepository userRepository;
 
     private static final List<Map<String, Object>> DEFAULT_SERVICES = List.of(
             Map.of("name", "Corte",                    "description", "Corte clásico a tu elección",       "price", 160, "duration", 30),
@@ -43,6 +45,13 @@ public class BarbershopService {
                 .build();
 
         barbershopRepository.save(barbershop);
+
+        // El rol se sincroniza aquí — así no depende de que el frontend haya llamado
+        // /auth/updateRole por separado en algún punto anterior del flujo.
+        if (user.getRole() != User.Role.owner) {
+            user.setRole(User.Role.owner);
+            userRepository.save(user);
+        }
 
         return ApiResponse.ok("Barbería creada exitosamente", Map.of("barbershop", buildBarbershopMap(barbershop)));
     }
