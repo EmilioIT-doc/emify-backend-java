@@ -1,6 +1,7 @@
 package com.emify.barbershop;
 
 import com.emify.auth.dto.ApiResponse;
+import com.emify.common.RequestValues;
 import com.emify.user.User;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -32,36 +33,40 @@ public class BarbershopController {
                 user,
                 request.getBusiness_name(),
                 request.getDescription(),
-                request.getWebsite()
+                request.getWebsite(),
+                request.getBarbershop_id()
         );
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
-    // POST /api/authBarberShop/barbershop/locations
+    // POST /api/authBarberShop/location/create   body: {barbershop_id, locations: [...]}
+    // barbershop_id indica a cuál barbería del dueño van las sucursales nuevas (puede tener varias).
     @PostMapping("/location/create")
     public ResponseEntity<ApiResponse<?>> createLocations(
-            @RequestBody Map<String, List<Map<String, Object>>> body,
+            @RequestBody Map<String, Object> body,
             Authentication authentication) {
 
         User user = (User) authentication.getPrincipal();
-        List<Map<String, Object>> locations = body.get("locations");
+        List<Map<String, Object>> locations = RequestValues.mapList(body.get("locations"));
 
         if (locations == null || locations.isEmpty()) {
             return ResponseEntity.badRequest()
                     .body(ApiResponse.fail("El campo locations es requerido"));
         }
 
-        ApiResponse<?> response = barbershopService.createLocations(user, locations);
+        ApiResponse<?> response = barbershopService.createLocations(
+                user, RequestValues.toLong(body.get("barbershop_id")), locations);
         if (!response.isStatus()) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
         }
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
-    // GET /api/authBarberShop/barbershop/{id}
+    // GET /api/authBarberShop/barbershop/{id}  (solo el dueño: incluye los códigos de invitación)
     @GetMapping("/barbershop/{id}")
-    public ResponseEntity<ApiResponse<?>> getBarbershop(@PathVariable Long id) {
-        ApiResponse<?> response = barbershopService.getBarbershop(id);
+    public ResponseEntity<ApiResponse<?>> getBarbershop(@PathVariable Long id, Authentication authentication) {
+        User user = (User) authentication.getPrincipal();
+        ApiResponse<?> response = barbershopService.getBarbershop(user, id);
         if (!response.isStatus()) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
         }
@@ -85,8 +90,8 @@ public class BarbershopController {
         return ResponseEntity.ok(response);
     }
 
-    // POST /api/authBarberShop/location/{id}/default
-    @PostMapping("/location/{id}/default")
+    // POST /api/authBarberShop/location/{id}/default  (el frontend usa /set-default)
+    @PostMapping({"/location/{id}/default", "/location/{id}/set-default"})
     public ResponseEntity<ApiResponse<?>> setDefaultLocation(
             @PathVariable Long id,
             Authentication authentication) {
@@ -131,5 +136,6 @@ public class BarbershopController {
         private String business_name;
         private String description;
         private String website;
+        private Long barbershop_id; // opcional: actualizar esta barbería en vez de crear otra
     }
 }

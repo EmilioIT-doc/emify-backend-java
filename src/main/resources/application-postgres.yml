@@ -1,0 +1,23 @@
+# =============================================================
+# Perfil "postgres": PostgreSQL local (localhost:5432, base "emify").
+# Uso: ./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres
+# =============================================================
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/emify
+    username: postgres
+    password: postgres123
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+
+  flyway:
+    locations: classpath:db/migration
+
+emify:
+  dev:
+    expose-verification-code: true
+  uploads:
+    enabled: true

@@ -9,6 +9,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.*;
 
 @Service
@@ -20,6 +21,7 @@ public class BarbershopService {
     private final ServiceRepository serviceRepository;
     private final AvailabilityRepository availabilityRepository;
     private final UserRepository userRepository;
+    private final BarbershopStaffRepository staffRepository;
 
     private static final List<Map<String, Object>> DEFAULT_SERVICES = List.of(
             Map.of("name", "Corte",                    "description", "Corte clásico a tu elección",       "price", 160, "duration", 30),
@@ -35,14 +37,31 @@ public class BarbershopService {
     // CREATE BARBERSHOP
     // -------------------------------------------------------
     @Transactional
-    public ApiResponse<?> createBarbershop(User user, String businessName, String description, String website) {
-        Barbershop barbershop = Barbershop.builder()
-                .name(businessName)
-                .description(description)
-                .website(website)
-                .owner(user)
-                .isActive(true)
-                .build();
+    public ApiResponse<?> createBarbershop(User user, String businessName, String description, String website,
+                                          Long barbershopId) {
+        if (businessName == null || businessName.isBlank()) {
+            return ApiResponse.fail("El nombre del negocio es requerido");
+        }
+
+        // Un dueño puede tener varias barberías (marcas distintas). Se reutiliza una existente cuando:
+        // - el wizard manda barbershop_id (regresó al paso 1 y lo volvió a enviar), o
+        // - tiene una barbería sin sucursales (un alta que dejó a medias).
+        // Si no, se crea una barbería nueva.
+        Barbershop barbershop;
+        if (barbershopId != null) {
+            barbershop = barbershopRepository.findById(barbershopId)
+                    .filter(b -> b.getOwner().getId().equals(user.getId()))
+                    .orElse(null);
+            if (barbershop == null) return ApiResponse.fail("Barbería no encontrada");
+        } else {
+            barbershop = barbershopRepository.findByOwnerIdOrderByIdAsc(user.getId()).stream()
+                    .filter(b -> !locationRepository.existsByBarbershopIdAndDeletedAtIsNull(b.getId()))
+                    .reduce((first, second) -> second)
+                    .orElseGet(() -> Barbershop.builder().owner(user).isActive(true).build());
+        }
+        barbershop.setName(businessName.trim());
+        barbershop.setDescription(description);
+        barbershop.setWebsite(website);
 
         barbershopRepository.save(barbershop);
 
@@ -60,12 +79,11 @@ public class BarbershopService {
     // CREATE LOCATIONS
     // -------------------------------------------------------
     @Transactional
-    public ApiResponse<?> createLocations(User user, List<Map<String, Object>> locations) {
-        Barbershop barbershop = barbershopRepository.findByOwnerId(user.getId())
-                .orElse(null);
+    public ApiResponse<?> createLocations(User user, Long barbershopId, List<Map<String, Object>> locations) {
+        Barbershop barbershop = resolveTargetBarbershop(user, barbershopId, locations);
 
         if (barbershop == null) {
-            return ApiResponse.fail("No tienes una barbería registrada");
+            return ApiResponse.fail(barbershopId != null ? "Barbería no encontrada" : "No tienes una barbería registrada");
         }
 
         List<Map<String, Object>> result = new ArrayList<>();
@@ -128,11 +146,35 @@ public class BarbershopService {
         return ApiResponse.ok("Sucursales guardadas exitosamente", Map.of("Barberias", result));
     }
 
+    /**
+     * ¿A qué barbería van las sucursales nuevas? (un dueño puede tener varias)
+     * 1. barbershop_id del body (el front siempre lo manda);
+     * 2. la barbería de alguna sucursal existente que venga en la lista;
+     * 3. compatibilidad: la barbería más reciente del dueño.
+     */
+    private Barbershop resolveTargetBarbershop(User user, Long barbershopId, List<Map<String, Object>> locations) {
+        if (barbershopId != null) {
+            return barbershopRepository.findById(barbershopId)
+                    .filter(b -> b.getOwner().getId().equals(user.getId()))
+                    .orElse(null);
+        }
+        for (Map<String, Object> loc : locations) {
+            if (loc.get("id") == null) continue;
+            Optional<BarbershopLocation> existing = locationRepository
+                    .findByIdAndOwnerId(Long.valueOf(loc.get("id").toString()), user.getId());
+            if (existing.isPresent()) return existing.get().getBarbershop();
+        }
+        List<Barbershop> owned = barbershopRepository.findByOwnerIdOrderByIdAsc(user.getId());
+        return owned.isEmpty() ? null : owned.get(owned.size() - 1);
+    }
+
     // -------------------------------------------------------
     // GET BARBERSHOP
     // -------------------------------------------------------
-    public ApiResponse<?> getBarbershop(Long id) {
-        Barbershop barbershop = barbershopRepository.findById(id).orElse(null);
+    public ApiResponse<?> getBarbershop(User user, Long id) {
+        Barbershop barbershop = barbershopRepository.findById(id)
+                .filter(b -> b.getOwner().getId().equals(user.getId()))
+                .orElse(null);
 
         if (barbershop == null) {
             return ApiResponse.fail("Barbería no encontrada");
@@ -224,22 +266,38 @@ public class BarbershopService {
             return ApiResponse.fail("Sucursal no encontrada");
         }
 
-        availabilityRepository.deleteByLocationIdAndStaffIdIsNull(locationId);
-
+        // Validar todo antes de borrar el horario anterior
+        List<Availability> newSchedule = new ArrayList<>();
         for (Map<String, Object> day : schedule) {
-            boolean enabled = getBool(day, "enabled");
-            if (enabled) {
-                Availability availability = Availability.builder()
-                        .locationId(locationId)
-                        .staffId(null)
-                        .dayOfWeek(((Number) day.get("day_of_week")).shortValue())
-                        .startTime(java.time.LocalTime.parse((String) day.get("start_time")))
-                        .endTime(java.time.LocalTime.parse((String) day.get("end_time")))
-                        .isActive(true)
-                        .build();
-                availabilityRepository.save(availability);
+            if (!getBool(day, "enabled")) continue;
+
+            Object dayOfWeek = day.get("day_of_week");
+            if (!(dayOfWeek instanceof Number number) || number.intValue() < 0 || number.intValue() > 6) {
+                return ApiResponse.fail("Día de la semana inválido");
             }
+            LocalTime start;
+            LocalTime end;
+            try {
+                start = LocalTime.parse(String.valueOf(day.get("start_time")));
+                end = LocalTime.parse(String.valueOf(day.get("end_time")));
+            } catch (Exception e) {
+                return ApiResponse.fail("Hora inválida, usa el formato HH:mm");
+            }
+            if (!start.isBefore(end)) {
+                return ApiResponse.fail("La hora de apertura debe ser antes que la de cierre");
+            }
+            newSchedule.add(Availability.builder()
+                    .locationId(locationId)
+                    .staffId(null)
+                    .dayOfWeek(number.shortValue())
+                    .startTime(start)
+                    .endTime(end)
+                    .isActive(true)
+                    .build());
         }
+
+        availabilityRepository.deleteByLocationIdAndStaffIdIsNull(locationId);
+        availabilityRepository.saveAll(newSchedule);
 
         return ApiResponse.ok("Horario guardado exitosamente", null);
     }
@@ -319,6 +377,12 @@ public class BarbershopService {
         map.put("serves_online", l.isServesOnline());
         map.put("latitude", l.getLatitude());
         map.put("longitude", l.getLongitude());
+
+        // Para el aviso del dashboard: el dueño atendiendo en varias sucursales
+        Long ownerId = l.getBarbershop().getOwner().getId();
+        List<BarbershopStaff> staff = staffRepository.findByLocationIdAndIsActiveTrue(l.getId());
+        map.put("staff_count", staff.size());
+        map.put("owner_is_staff", staff.stream().anyMatch(s -> s.getUser().getId().equals(ownerId)));
         return map;
     }
 }

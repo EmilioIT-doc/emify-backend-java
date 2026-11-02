@@ -34,6 +34,8 @@ public class SecurityConfig {
                 .cors(cors -> cors.configurationSource(corsConfigurationSource)) // ← usa el bean de CorsConfig
                 .csrf(AbstractHttpConfigurer::disable)
                 .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/error").permitAll()          // si no, cualquier error se volvía 403
+                        .requestMatchers("/uploads/**").permitAll()     // imágenes locales (FileStorageService)
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/api/booking/**").permitAll()
                         .requestMatchers("/api/ordering/**").permitAll()

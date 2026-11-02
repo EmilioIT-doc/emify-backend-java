@@ -1,6 +1,7 @@
 package com.emify.restaurant;
 
 import com.emify.auth.dto.ApiResponse;
+import com.emify.common.RequestValues;
 import com.emify.user.User;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
@@ -35,25 +36,28 @@ public class RestaurantController {
                 request.getDescription(),
                 request.getWebsite(),
                 request.getCuisine_type(),
-                request.getOrder_modes()
+                request.getOrder_modes(),
+                request.getRestaurant_id()
         );
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
     }
 
     // POST /api/authRestaurant/location/create
+    //   body: {restaurant_id, locations: [...]} — restaurant_id indica a cuál restaurante del dueño van
     @PostMapping("/location/create")
     public ResponseEntity<ApiResponse<?>> createLocations(
-            @RequestBody Map<String, List<Map<String, Object>>> body,
+            @RequestBody Map<String, Object> body,
             Authentication authentication) {
 
         User user = (User) authentication.getPrincipal();
-        List<Map<String, Object>> locations = body.get("locations");
+        List<Map<String, Object>> locations = RequestValues.mapList(body.get("locations"));
 
         if (locations == null || locations.isEmpty()) {
             return ResponseEntity.badRequest().body(ApiResponse.fail("El campo locations es requerido"));
         }
 
-        ApiResponse<?> response = restaurantService.createLocations(user, locations);
+        ApiResponse<?> response = restaurantService.createLocations(
+                user, RequestValues.toLong(body.get("restaurant_id")), locations);
         if (!response.isStatus()) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).body(response);
         }
@@ -239,6 +243,7 @@ public class RestaurantController {
         private String cuisine_type;
         private Map<String, Object> order_modes;
         private String theme_color;
+        private Long restaurant_id; // opcional: actualizar este restaurante en vez de crear otro
     }
 
     @Data

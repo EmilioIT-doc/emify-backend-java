@@ -14,14 +14,16 @@ public class CorsConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOrigins(List.of(
+        // OJO: si se usan allowedOrigins Y allowedOriginPatterns a la vez, Spring
+        // ignora por completo allowedOrigins. Por eso todo (exacto y con wildcard)
+        // va en una sola lista de patterns.
+        config.setAllowedOriginPatterns(List.of(
                 "http://localhost:3000",
                 "http://localhost:5173",
+                "http://127.0.0.1:5173",
                 "http://localhost:4200",
                 "http://localhost:8080",
-                "https://emify-frontend.vercel.app"
-        ));
-        config.setAllowedOriginPatterns(List.of(
+                "https://emify-frontend.vercel.app",
                 "https://emify-frontend-*.vercel.app"
         ));
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));

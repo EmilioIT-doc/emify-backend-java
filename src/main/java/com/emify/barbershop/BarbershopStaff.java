@@ -3,6 +3,8 @@ package com.emify.barbershop;
 import com.emify.user.User;
 import jakarta.persistence.*;
 import lombok.*;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.LocalDateTime;
 
@@ -26,9 +28,12 @@ public class BarbershopStaff {
     @JoinColumn(name = "location_id", nullable = false)
     private BarbershopLocation location;
 
+    // Antes era String: en PostgreSQL la columna es el ENUM staff_role y un varchar no entra.
+    @Enumerated(EnumType.STRING)
+    @JdbcTypeCode(SqlTypes.NAMED_ENUM)
     @Column(nullable = false)
     @Builder.Default
-    private String role = "barber";
+    private Role role = Role.barber;
 
     @Column(name = "is_active")
     @Builder.Default
@@ -49,5 +54,9 @@ public class BarbershopStaff {
     @PreUpdate
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
+    }
+
+    public enum Role {
+        barber, admin, manager
     }
 }
