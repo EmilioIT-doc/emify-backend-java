@@ -3,24 +3,30 @@ package com.emify.auth;
 import com.emify.auth.dto.*;
 import com.emify.barbershop.Barbershop;
 import com.emify.barbershop.BarbershopLocation;
+import com.emify.barbershop.BarbershopLocationRepository;
 import com.emify.barbershop.BarbershopRepository;
 import com.emify.barbershop.BarbershopStaff;
 import com.emify.barbershop.BarbershopStaffRepository;
 import com.emify.restaurant.Restaurant;
+import com.emify.restaurant.RestaurantLocationRepository;
 import com.emify.restaurant.RestaurantRepository;
 import com.emify.security.JwtUtil;
 import com.emify.user.User;
 import com.emify.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
@@ -34,10 +40,15 @@ public class AuthService {
     private final BarbershopRepository barbershopRepository;
     private final BarbershopStaffRepository barbershopStaffRepository;
     private final RestaurantRepository restaurantRepository;
+    private final BarbershopLocationRepository barbershopLocationRepository;
+    private final RestaurantLocationRepository restaurantLocationRepository;
     private final EmailVerificationCodeRepository verificationCodeRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtUtil jwtUtil;
     private final AuthenticationManager authenticationManager;
+
+    @Value("${emify.dev.expose-verification-code:false}")
+    private boolean exposeVerificationCode;
 
     private static final List<String> AVATARS = List.of(
             "https://emify-media.s3.us-east-2.amazonaws.com/avatars/chamuel.png",
@@ -77,7 +88,10 @@ public class AuthService {
             // No retornamos error — solo logueamos
         }
 
-        return ApiResponse.ok("Código de verificación enviado", null);
+        // Solo en local (emify.dev.expose-verification-code): sin SMTP no hay forma de
+        // recibir el código, así que se regresa para que el frontend lo muestre.
+        return ApiResponse.ok("Código de verificación enviado",
+                exposeVerificationCode ? Map.of("dev_code", code) : null);
     }
 
     // -------------------------------------------------------
@@ -155,8 +169,7 @@ public class AuthService {
         Map<String, Object> response = new HashMap<>();
         response.put("token", token);
         response.put("role", user.getRole().name());
-        response.put("business", buildBusinessMap(user));
-        response.put("staff_location", buildStaffLocationMap(user));
+        putBusinessInfo(response, user);
         response.put("user", buildUserMap(user));
 
         return ApiResponse.ok("Autenticación exitosa", response);
@@ -180,13 +193,13 @@ public class AuthService {
     // -------------------------------------------------------
     // GET ME (perfil del usuario logeado)
     // -------------------------------------------------------
+    @Transactional(readOnly = true)
     public ApiResponse<?> getMe(String email) {
         User user = userRepository.findByEmail(email)
                 .orElseThrow(() -> new RuntimeException("Usuario no encontrado"));
 
         Map<String, Object> userMap = new HashMap<>(buildUserMap(user));
-        userMap.put("business", buildBusinessMap(user));
-        userMap.put("staff_location", buildStaffLocationMap(user));
+        putBusinessInfo(userMap, user);
 
         return ApiResponse.ok("Perfil obtenido", userMap);
     }
@@ -210,8 +223,7 @@ public class AuthService {
         userRepository.save(user);
 
         Map<String, Object> userMap = new HashMap<>(buildUserMap(user));
-        userMap.put("business", buildBusinessMap(user));
-        userMap.put("staff_location", buildStaffLocationMap(user));
+        putBusinessInfo(userMap, user);
 
         return ApiResponse.ok("Perfil actualizado", userMap);
     }
@@ -219,8 +231,72 @@ public class AuthService {
     // -------------------------------------------------------
     // HELPERS
     // -------------------------------------------------------
+
+    /**
+     * Negocios del usuario para el front:
+     * - business:       el primero (compatibilidad con pantallas viejas)
+     * - businesses:     todos los negocios de los que es dueño, uno por rubro (barbería, restaurante...)
+     * - staff_location: primera sucursal donde trabaja como personal (compatibilidad)
+     * - workplaces:     sucursales de OTROS dueños donde trabaja ("Donde trabajas" en /mis-negocios)
+     */
+    private void putBusinessInfo(Map<String, Object> target, User user) {
+        target.put("business", buildBusinessMap(user));
+        target.put("businesses", buildBusinessList(user));
+        target.put("staff_location", buildStaffLocationMap(user));
+        target.put("workplaces", buildWorkplaces(user));
+    }
+
+    // Todos los negocios del dueño, de todos los rubros. Puede tener varios del mismo rubro
+    // (marcas distintas), cada uno con sus sucursales. Para sumar un rubro nuevo, agrega su bloque.
+    private List<Map<String, Object>> buildBusinessList(User user) {
+        List<Map<String, Object>> list = new ArrayList<>();
+
+        for (Barbershop b : barbershopRepository.findByOwnerIdOrderByIdAsc(user.getId())) {
+            list.add(businessEntry(b.getId(), b.getName(), "barbershop",
+                    barbershopLocationRepository.countByBarbershopIdAndDeletedAtIsNull(b.getId())));
+        }
+
+        for (Restaurant r : restaurantRepository.findByOwnerIdOrderByIdAsc(user.getId())) {
+            list.add(businessEntry(r.getId(), r.getName(), "restaurant",
+                    restaurantLocationRepository.countByRestaurantIdAndDeletedAtIsNull(r.getId())));
+        }
+
+        return list;
+    }
+
+    private static Map<String, Object> businessEntry(Long id, String name, String rubro, long locationsCount) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", id);
+        map.put("name", name);
+        map.put("rubro", rubro);
+        map.put("locations_count", locationsCount);
+        return map;
+    }
+
+    // Sucursales donde el usuario es personal activo en un negocio que NO es suyo
+    // (las de su propio negocio ya se ven desde "Mis negocios").
+    private List<Map<String, Object>> buildWorkplaces(User user) {
+        List<Map<String, Object>> list = new ArrayList<>();
+        for (BarbershopStaff staff : barbershopStaffRepository.findByUserIdAndIsActiveTrueOrderByIdAsc(user.getId())) {
+            BarbershopLocation location = staff.getLocation();
+            if (location == null || location.getDeletedAt() != null) continue;
+            Barbershop barbershop = location.getBarbershop();
+            if (barbershop.getOwner().getId().equals(user.getId())) continue;
+
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("location_id", location.getId());
+            map.put("location_name", location.getName());
+            map.put("business_id", barbershop.getId());
+            map.put("business_name", barbershop.getName());
+            map.put("rubro", "barbershop");
+            list.add(map);
+        }
+        return list;
+    }
+
+    // Compatibilidad: el primer negocio (las pantallas nuevas usan "businesses")
     private Map<String, Object> buildBusinessMap(User user) {
-        Barbershop barbershop = barbershopRepository.findByOwnerId(user.getId()).orElse(null);
+        Barbershop barbershop = barbershopRepository.findByOwnerIdOrderByIdAsc(user.getId()).stream().findFirst().orElse(null);
         if (barbershop != null) {
             return Map.of(
                     "id", barbershop.getId(),
@@ -229,7 +305,7 @@ public class AuthService {
             );
         }
 
-        Restaurant restaurant = restaurantRepository.findByOwnerId(user.getId()).orElse(null);
+        Restaurant restaurant = restaurantRepository.findByOwnerIdOrderByIdAsc(user.getId()).stream().findFirst().orElse(null);
         if (restaurant != null) {
             return Map.of(
                     "id", restaurant.getId(),
@@ -247,6 +323,7 @@ public class AuthService {
         if (staff == null) return null;
 
         BarbershopLocation location = staff.getLocation();
+        if (location.getDeletedAt() != null) return null;
         return Map.of(
                 "id", location.getId(),
                 "name", location.getName(),

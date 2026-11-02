@@ -1,9 +1,13 @@
 package com.emify.booking;
 
 import com.emify.auth.dto.ApiResponse;
+import com.emify.common.CurrentUser;
+import com.emify.common.FileStorageService;
+import com.emify.user.User;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -14,6 +18,7 @@ import java.util.Map;
 public class BookingController {
 
     private final BookingService bookingService;
+    private final FileStorageService fileStorageService;
 
     // GET /api/booking/location/{id}
     @GetMapping("/location/{id}")
@@ -49,15 +54,26 @@ public class BookingController {
             @RequestParam(required = false) String notes,
             @RequestParam(required = false) org.springframework.web.multipart.MultipartFile reference_image) {
 
-        // Por ahora ignoramos la imagen (sin S3 configurado)
+        // Sin S3: en local la imagen se guarda en disco (emify.uploads.*); en prod se ignora.
+        String referenceImageUrl = fileStorageService.storeImage(reference_image, "appointments");
         ApiResponse<?> response = bookingService.createAppointment(
                 location_id, service_id, staff_id,
-                start_time, name, phone, notes, null);
+                start_time, name, phone, notes, referenceImageUrl);
 
         if (!response.isStatus()) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(response);
         }
         return ResponseEntity.status(HttpStatus.CREATED).body(response);
+    }
+
+    // GET /api/booking/my-appointments  (requiere sesión; /api/booking/** es público en SecurityConfig)
+    @GetMapping("/my-appointments")
+    public ResponseEntity<ApiResponse<?>> getMyAppointments(Authentication authentication) {
+        User user = CurrentUser.of(authentication).orElse(null);
+        if (user == null) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.fail("No autenticado"));
+        }
+        return ResponseEntity.ok(bookingService.getMyAppointments(user));
     }
 
     // GET /api/booking/appointment/{token}
@@ -86,7 +102,7 @@ public class BookingController {
             @PathVariable String token,
             @RequestBody Map<String, String> body) {
 
-        ApiResponse<?> response = bookingService.rescheduleAppointment(token, body.get("start_time"));
+        ApiResponse<?> response = bookingService.rescheduleAppointment(token, body != null ? body.get("start_time") : null);
         if (!response.isStatus()) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(response);
         }

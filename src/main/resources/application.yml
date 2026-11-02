@@ -1,14 +1,20 @@
+# =============================================================
+# Configuración común a todos los perfiles.
+#
+# Perfiles de base de datos:
+#   - sqlite   (DEFAULT, sin instalar nada) → archivo ./emify-local.db
+#   - postgres (PostgreSQL local en localhost:5432)
+#   - prod     (OpenShift / servidor; lo activa el Dockerfile)
+#
+# Para cambiar de perfil:  ./mvnw spring-boot:run -Dspring-boot.run.profiles=postgres
+# =============================================================
 spring:
-  datasource:
-    url: jdbc:postgresql://localhost:5432/emify
-    username: postgres
-    password: postgres123
-    driver-class-name: org.postgresql.Driver
+  profiles:
+    # Solo aplica cuando no hay ningún perfil activo (en el servidor SPRING_PROFILES_ACTIVE=prod)
+    default: sqlite
 
   jpa:
-    hibernate:
-      ddl-auto: validate
-    show-sql: true
+    show-sql: false
     properties:
       hibernate:
         format_sql: true
@@ -16,12 +22,15 @@ spring:
 
   flyway:
     enabled: true
-    locations: classpath:db/migration
     baseline-on-migrate: false
     validate-on-migrate: true
-    url: jdbc:postgresql://localhost:5432/emify
-    user: postgres
-    password: postgres123
+
+  servlet:
+    multipart:
+      # Fotos de referencia (citas) e imágenes de productos. El default de Spring es 1MB,
+      # con eso una foto normal de celular hacía fallar la reserva completa.
+      max-file-size: 10MB
+      max-request-size: 12MB
 
   security:
     jwt:
@@ -44,7 +53,23 @@ spring:
 server:
   port: 8080
 
+emify:
+  # Zona horaria de los negocios. Los horarios (slots) y las citas se guardan en hora local
+  # del negocio; si llega una fecha con "Z"/offset se convierte a esta zona.
+  timezone: America/Mexico_City
+  kafka:
+    # Sin broker de Kafka cada cita se tardaba ~3s esperando la conexión. Solo prod lo prende.
+    enabled: false
+  dev:
+    # Mientras no haya SMTP, regresa el código de verificación en la respuesta (solo local).
+    expose-verification-code: false
+  uploads:
+    # Guarda imágenes (referencia de citas, productos) en disco y las sirve en /uploads/**.
+    # Es para pruebas locales; en el servidor debería ir a S3 o similar.
+    enabled: false
+    dir: ./uploads
+
 logging:
   level:
-    org.springframework.security: DEBUG
+    org.springframework.security: INFO
     com.emify: DEBUG

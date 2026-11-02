@@ -48,6 +48,13 @@ spring:
 server:
   port: 8080
 
+emify:
+  kafka:
+    enabled: true
+  uploads:
+    # El contenedor no guarda archivos entre reinicios; las imágenes se ignoran hasta tener S3
+    enabled: false
+
 logging:
   level:
     org.springframework.security: WARN

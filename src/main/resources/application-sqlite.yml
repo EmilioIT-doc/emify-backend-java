@@ -1,0 +1,32 @@
+# =============================================================
+# Perfil "sqlite" (default): base de datos en un archivo local, sin instalar nada.
+# El archivo emify-local.db se crea solo en la carpeta desde donde corres el backend.
+# Para empezar de cero, apaga el backend y borra emify-local.db.
+#
+# OJO: el esquema SQLite vive en db/sqlite y es una traducción del de PostgreSQL
+# (db/migration). Si agregas una migración nueva en db/migration, agrega también
+# su equivalente en db/sqlite.
+# =============================================================
+spring:
+  datasource:
+    # date_class=TEXT → las fechas se guardan legibles ("2026-11-02 10:00:00.000")
+    url: jdbc:sqlite:emify-local.db?foreign_keys=true&date_class=TEXT&busy_timeout=5000
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      # SQLite solo admite un escritor a la vez
+      maximum-pool-size: 1
+
+  jpa:
+    database-platform: com.emify.config.EmifySQLiteDialect
+    hibernate:
+      # validate no es confiable con los tipos "flexibles" de SQLite; el esquema lo maneja Flyway
+      ddl-auto: none
+
+  flyway:
+    locations: classpath:db/sqlite
+
+emify:
+  dev:
+    expose-verification-code: true
+  uploads:
+    enabled: true

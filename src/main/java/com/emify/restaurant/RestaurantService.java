@@ -33,19 +33,31 @@ public class RestaurantService {
     // -------------------------------------------------------
     @Transactional
     public ApiResponse<?> createRestaurant(User user, String businessName, String description, String website,
-                                            String cuisineType, Map<String, Object> orderModes) {
+                                            String cuisineType, Map<String, Object> orderModes, Long restaurantId) {
 
-        Restaurant restaurant = Restaurant.builder()
-                .name(businessName)
-                .description(description)
-                .website(website)
-                .cuisineType(cuisineType)
-                .owner(user)
-                .orderModeTable(getBool(orderModes, "table"))
-                .orderModeDelivery(getBool(orderModes, "delivery"))
-                .orderModePickup(getBool(orderModes, "pickup"))
-                .isActive(true)
-                .build();
+        // Un dueño puede tener varios restaurantes (marcas distintas). Se reutiliza uno existente cuando:
+        // - el wizard manda restaurant_id (regresó al paso 1 y lo volvió a enviar), o
+        // - tiene un restaurante sin sucursales (un alta que dejó a medias).
+        // Si no, se crea un restaurante nuevo (mismo criterio que en barbería).
+        Restaurant restaurant;
+        if (restaurantId != null) {
+            restaurant = restaurantRepository.findById(restaurantId)
+                    .filter(r -> r.getOwner().getId().equals(user.getId()))
+                    .orElse(null);
+            if (restaurant == null) return ApiResponse.fail("Restaurante no encontrado");
+        } else {
+            restaurant = restaurantRepository.findByOwnerIdOrderByIdAsc(user.getId()).stream()
+                    .filter(r -> !locationRepository.existsByRestaurantIdAndDeletedAtIsNull(r.getId()))
+                    .reduce((first, second) -> second)
+                    .orElseGet(() -> Restaurant.builder().owner(user).isActive(true).build());
+        }
+        restaurant.setName(businessName);
+        restaurant.setDescription(description);
+        restaurant.setWebsite(website);
+        restaurant.setCuisineType(cuisineType);
+        restaurant.setOrderModeTable(getBool(orderModes, "table"));
+        restaurant.setOrderModeDelivery(getBool(orderModes, "delivery"));
+        restaurant.setOrderModePickup(getBool(orderModes, "pickup"));
 
         restaurantRepository.save(restaurant);
 
@@ -63,11 +75,11 @@ public class RestaurantService {
     // CREATE / UPDATE LOCATIONS
     // -------------------------------------------------------
     @Transactional
-    public ApiResponse<?> createLocations(User user, List<Map<String, Object>> locations) {
-        Restaurant restaurant = restaurantRepository.findByOwnerId(user.getId()).orElse(null);
+    public ApiResponse<?> createLocations(User user, Long restaurantId, List<Map<String, Object>> locations) {
+        Restaurant restaurant = resolveTargetRestaurant(user, restaurantId, locations);
 
         if (restaurant == null) {
-            return ApiResponse.fail("No tienes un restaurante registrado");
+            return ApiResponse.fail(restaurantId != null ? "Restaurante no encontrado" : "No tienes un restaurante registrado");
         }
 
         List<Map<String, Object>> result = new ArrayList<>();
@@ -464,6 +476,26 @@ public class RestaurantService {
         Object val = map.get(key);
         if (val == null) return null;
         return new BigDecimal(val.toString());
+    }
+
+    /**
+     * ¿A qué restaurante van las sucursales nuevas? (un dueño puede tener varios)
+     * 1. restaurant_id del body; 2. el de alguna sucursal existente de la lista; 3. el más reciente del dueño.
+     */
+    private Restaurant resolveTargetRestaurant(User user, Long restaurantId, List<Map<String, Object>> locations) {
+        if (restaurantId != null) {
+            return restaurantRepository.findById(restaurantId)
+                    .filter(r -> r.getOwner().getId().equals(user.getId()))
+                    .orElse(null);
+        }
+        for (Map<String, Object> loc : locations) {
+            if (loc.get("id") == null) continue;
+            RestaurantLocation existing = locationRepository
+                    .findByIdAndOwnerId(Long.valueOf(loc.get("id").toString()), user.getId()).orElse(null);
+            if (existing != null) return existing.getRestaurant();
+        }
+        List<Restaurant> owned = restaurantRepository.findByOwnerIdOrderByIdAsc(user.getId());
+        return owned.isEmpty() ? null : owned.get(owned.size() - 1);
     }
 
     private Map<String, Object> buildRestaurantMap(Restaurant r) {

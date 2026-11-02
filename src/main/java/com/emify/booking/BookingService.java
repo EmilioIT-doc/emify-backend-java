@@ -2,6 +2,10 @@ package com.emify.booking;
 
 import com.emify.auth.dto.ApiResponse;
 import com.emify.barbershop.*;
+import com.emify.booking.Appointment.AppointmentStatus;
+import com.emify.common.BusinessClock;
+import com.emify.kafka.AppointmentEvent;
+import com.emify.kafka.KafkaProducerService;
 import com.emify.user.User;
 import com.emify.user.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -9,18 +13,23 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 
-import com.emify.kafka.AppointmentEvent;
-import com.emify.kafka.KafkaProducerService;
+import static com.emify.booking.AppointmentRepository.ACTIVE_STATUSES;
+import static com.emify.booking.AppointmentRepository.ATTENDED;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class BookingService {
+
+    private static final DateTimeFormatter HH_MM = DateTimeFormatter.ofPattern("HH:mm");
+    private static final DateTimeFormatter DISPLAY_DATE_TIME = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
+
     private final KafkaProducerService kafkaProducerService;
     private final AppointmentRepository appointmentRepository;
     private final BarbershopLocationRepository locationRepository;
@@ -28,24 +37,23 @@ public class BookingService {
     private final ServiceRepository serviceRepository;
     private final AvailabilityRepository availabilityRepository;
     private final UserRepository userRepository;
+    private final BusinessClock clock;
 
     // -------------------------------------------------------
     // GET LOCATION INFO
     // -------------------------------------------------------
     public ApiResponse<?> getLocationInfo(Long locationId) {
-        BarbershopLocation location = locationRepository.findById(locationId).orElse(null);
+        BarbershopLocation location = findActiveLocation(locationId);
         if (location == null) return ApiResponse.fail("Sucursal no encontrada");
 
         List<BarberService> services = serviceRepository.findByLocationIdAndIsActiveTrue(locationId);
-        List<BarbershopStaff> staff = staffRepository.findByLocationIdAndIsActiveTrue(locationId);
+        List<BarbershopStaff> staff = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId);
         List<Availability> availability = availabilityRepository
                 .findByLocationIdAndStaffIdIsNullAndIsActiveTrue(locationId);
 
-        LocalDateTime now = LocalDateTime.now();
-
-        // Conteo de servicios por staff
+        // Conteo de servicios atendidos por staff
         List<Map<String, Object>> staffList = staff.stream().map(s -> {
-            long count = appointmentRepository.countByLocationAndStaffBefore(locationId, s.getId(), now);
+            long count = appointmentRepository.countByLocationAndStaff(locationId, s.getId(), ATTENDED);
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("id", s.getId());
             map.put("role", s.getRole());
@@ -73,7 +81,7 @@ public class BookingService {
 
         // Conteo de bookings por servicio
         List<Map<String, Object>> serviceList = services.stream().map(s -> {
-            long count = appointmentRepository.countByLocationAndServiceBefore(locationId, s.getId(), now);
+            long count = appointmentRepository.countByLocationAndService(locationId, s.getId(), ATTENDED);
             Map<String, Object> map = new LinkedHashMap<>();
             map.put("id", s.getId());
             map.put("location_id", s.getLocation().getId());
@@ -97,13 +105,15 @@ public class BookingService {
                 });
 
         // Availability
-        List<Map<String, Object>> availabilityList = availability.stream().map(a -> Map.of(
-                "id", (Object) a.getId(),
-                "day_of_week", a.getDayOfWeek(),
-                "start_time", a.getStartTime().toString(),
-                "end_time", a.getEndTime().toString(),
-                "is_active", a.isActive()
-        )).toList();
+        List<Map<String, Object>> availabilityList = availability.stream()
+                .sorted(Comparator.comparing(Availability::getDayOfWeek))
+                .map(a -> Map.of(
+                        "id", (Object) a.getId(),
+                        "day_of_week", a.getDayOfWeek(),
+                        "start_time", a.getStartTime().format(HH_MM),
+                        "end_time", a.getEndTime().format(HH_MM),
+                        "is_active", a.isActive()
+                )).toList();
 
         // Location map
         Map<String, Object> locationMap = new LinkedHashMap<>();
@@ -136,8 +146,9 @@ public class BookingService {
     // GET AVAILABLE SLOTS
     // -------------------------------------------------------
     public ApiResponse<?> getAvailableSlots(Long locationId, String date, Long staffId, int duration) {
-        // Obtener día de la semana
-        java.time.LocalDate localDate = java.time.LocalDate.parse(date);
+        LocalDate localDate = clock.parseDate(date);
+        if (duration <= 0) duration = 30;
+        final int slotMinutes = duration;
         int dayOfWeek = localDate.getDayOfWeek().getValue() % 7; // 0=Domingo, 6=Sábado
 
         Availability availability = availabilityRepository
@@ -150,30 +161,33 @@ public class BookingService {
 
         // Generar slots
         List<String> slots = new ArrayList<>();
-        LocalTime start = availability.getStartTime();
         LocalTime end = availability.getEndTime();
-        LocalTime current = start;
+        LocalTime current = availability.getStartTime();
 
-        while (current.plusMinutes(duration).compareTo(end) <= 0) {
-            slots.add(current.format(DateTimeFormatter.ofPattern("HH:mm")));
-            current = current.plusMinutes(duration);
+        while (!current.plusMinutes(slotMinutes).isAfter(end)
+                && current.plusMinutes(slotMinutes).isAfter(current)) { // evita dar la vuelta a medianoche
+            slots.add(current.format(HH_MM));
+            current = current.plusMinutes(slotMinutes);
         }
 
-        // Obtener citas reservadas
-        LocalDateTime dateTime = localDate.atStartOfDay();
-        List<Appointment> bookedAppointments;
-
-        if (staffId != null) {
-            bookedAppointments = appointmentRepository.findByLocationAndStaffAndDate(locationId, staffId, dateTime);
-        } else {
-            bookedAppointments = appointmentRepository.findByLocationAndDate(locationId, dateTime);
-        }
+        // Citas reservadas ese día
+        LocalDateTime from = localDate.atStartOfDay();
+        LocalDateTime to = from.plusDays(1);
+        // Con barbero: su agenda en TODAS las sucursales donde atiende (es la misma persona)
+        Long staffUserId = staffId != null
+                ? staffRepository.findById(staffId).map(s -> s.getUser().getId()).orElse(null)
+                : null;
+        List<Appointment> bookedAppointments = staffUserId != null
+                ? appointmentRepository.findByStaffUserBetween(staffUserId, from, to, ACTIVE_STATUSES)
+                : staffId != null
+                    ? appointmentRepository.findByLocationAndStaffBetween(locationId, staffId, from, to, ACTIVE_STATUSES)
+                    : appointmentRepository.findByLocationBetween(locationId, from, to, ACTIVE_STATUSES);
 
         // Filtrar slots bloqueados (con buffer de 10 minutos)
         int buffer = 10;
         List<String> availableSlots = slots.stream().filter(slot -> {
             LocalDateTime slotStart = localDate.atTime(LocalTime.parse(slot));
-            LocalDateTime slotEnd = slotStart.plusMinutes(duration);
+            LocalDateTime slotEnd = slotStart.plusMinutes(slotMinutes);
 
             for (Appointment appt : bookedAppointments) {
                 LocalDateTime apptStart = appt.getStartTime();
@@ -197,31 +211,53 @@ public class BookingService {
             String startTimeStr, String name, String phone,
             String notes, String referenceImageUrl) {
 
-        BarberService service = serviceRepository.findById(serviceId).orElse(null);
-        if (service == null) return ApiResponse.fail("Servicio no encontrado");
+        if (name == null || name.isBlank()) return ApiResponse.fail("Tu nombre es requerido");
+        if (phone == null || phone.isBlank()) return ApiResponse.fail("Tu teléfono es requerido");
+        name = name.trim();
+        phone = phone.trim();
 
-        BarbershopLocation location = locationRepository.findById(locationId).orElse(null);
+        BarbershopLocation location = findActiveLocation(locationId);
         if (location == null) return ApiResponse.fail("Sucursal no encontrada");
 
-        LocalDateTime startTime = LocalDateTime.parse(startTimeStr, DateTimeFormatter.ISO_DATE_TIME);
+        BarberService service = serviceRepository.findById(serviceId).orElse(null);
+        if (service == null || !service.getLocation().getId().equals(locationId)) {
+            return ApiResponse.fail("Servicio no encontrado");
+        }
+
+        BarbershopStaff staff = null;
+        if (staffId != null) {
+            staff = staffRepository.findById(staffId)
+                    .filter(BarbershopStaff::isActive)
+                    .filter(s -> s.getLocation().getId().equals(locationId))
+                    .orElse(null);
+            if (staff == null) return ApiResponse.fail("Barbero no encontrado en esta sucursal");
+        }
+
+        // Hora local del negocio (si llega con "Z"/offset se convierte; antes se guardaba corrida)
+        LocalDateTime startTime = clock.parseClientDateTime(startTimeStr);
         LocalDateTime endTime = startTime.plusMinutes(service.getDuration());
 
-        // Verificar overlap
-        if (staffId != null) {
-            boolean overlap = appointmentRepository.existsOverlapForStaff(staffId, startTime, endTime);
-            if (overlap) {
+        String scheduleError = validateSchedule(locationId, startTime, endTime);
+        if (scheduleError != null) return ApiResponse.fail(scheduleError);
+
+        // Verificar overlap (con barbero: su agenda en cualquier sucursal; sin barbero: la de la sucursal)
+        if (staff != null) {
+            if (appointmentRepository.existsOverlapForStaffUser(staff.getUser().getId(), startTime, endTime, ACTIVE_STATUSES)) {
                 return ApiResponse.fail("El barbero ya tiene una cita en ese horario");
             }
+        } else if (appointmentRepository.existsOverlapForLocation(locationId, startTime, endTime, ACTIVE_STATUSES)) {
+            return ApiResponse.fail("Ese horario ya está ocupado, elige otro");
         }
 
         // Buscar o crear usuario guest por teléfono
         String guestEmail = phone + "@guest.emify.com";
-        User user = userRepository.findFirstByPhoneOrderByIdAsc(phone)
+        final String guestPhone = phone;
+        User user = userRepository.findFirstByPhoneOrderByIdAsc(guestPhone)
                 .orElseGet(() -> userRepository.findByEmail(guestEmail).orElse(null));
 
         if (user == null) {
             user = User.builder()
-                    .phone(phone)
+                    .phone(guestPhone)
                     .name(name)
                     .email(guestEmail)
                     .password("$2a$10$guest_placeholder_password")
@@ -232,8 +268,6 @@ public class BookingService {
             userRepository.flush(); // ← fuerza que el INSERT se ejecute antes del appointment
         }
 
-        BarbershopStaff staff = staffId != null ? staffRepository.findById(staffId).orElse(null) : null;
-
         String token = UUID.randomUUID().toString().replace("-", "").substring(0, 32);
 
         Appointment appointment = Appointment.builder()
@@ -243,7 +277,7 @@ public class BookingService {
                 .location(location)
                 .startTime(startTime)
                 .endTime(endTime)
-                .status(Appointment.AppointmentStatus.pending)
+                .status(AppointmentStatus.pending)
                 .notes(notes)
                 .referenceImageUrl(referenceImageUrl)
                 .token(token)
@@ -266,15 +300,10 @@ public class BookingService {
                 .eventTimestamp(LocalDateTime.now())
                 .build();
 
-        try {
-            kafkaProducerService.publishAppointmentEvent(
-                    KafkaProducerService.TOPIC_APPOINTMENT_CREATED, event);
-        } catch (Exception e) {
-            log.warn("⚠️ Kafka no disponible: {}", e.getMessage());
-        }
+        kafkaProducerService.publishAppointmentEvent(KafkaProducerService.TOPIC_APPOINTMENT_CREATED, event);
 
         // TODO: WhatsApp notifications (UltraMsg) — se activan en producción
-        log.info("📅 Cita creada: {} - {} - {}", name, startTime, service.getName());
+        log.info("📅 Cita creada: {} - {} - {} (token {})", name, startTime, service.getName(), token);
 
         return ApiResponse.ok("Cita creada exitosamente", Map.of(
                 "appointment", Map.of(
@@ -300,6 +329,8 @@ public class BookingService {
         apptMap.put("client",     a.getUser() != null ? a.getUser().getName() : "");
         apptMap.put("service",    a.getService() != null ? a.getService().getName() : "");
         apptMap.put("service_id", a.getService() != null ? a.getService().getId() : "");
+        apptMap.put("duration",   a.getService() != null ? a.getService().getDuration() : 30);
+        apptMap.put("price",      a.getService() != null ? a.getService().getPrice() : 0);
         apptMap.put("staff",      a.getStaff() != null && a.getStaff().getUser() != null ? a.getStaff().getUser().getName() : "");
         apptMap.put("staff_id",   a.getStaff() != null ? a.getStaff().getId() : "");
         apptMap.put("location_id",a.getLocation() != null ? a.getLocation().getId() : "");
@@ -321,15 +352,18 @@ public class BookingService {
         Appointment appointment = appointmentRepository.findByToken(token).orElse(null);
         if (appointment == null) return ApiResponse.fail("Cita no encontrada");
 
-        if (appointment.getStatus() == Appointment.AppointmentStatus.cancelled) {
+        if (appointment.getStatus() == AppointmentStatus.cancelled) {
             return ApiResponse.fail("La cita ya está cancelada");
         }
+        if (appointment.getStatus() == AppointmentStatus.completed || appointment.getStatus() == AppointmentStatus.no_show) {
+            return ApiResponse.fail("Esta cita ya se cerró");
+        }
 
-        if (appointment.getStartTime().isBefore(LocalDateTime.now())) {
+        if (appointment.getStartTime().isBefore(clock.now())) {
             return ApiResponse.fail("No puedes cancelar una cita pasada");
         }
 
-        appointment.setStatus(Appointment.AppointmentStatus.cancelled);
+        appointment.setStatus(AppointmentStatus.cancelled);
         appointmentRepository.save(appointment);
 
         AppointmentEvent cancelEvent = AppointmentEvent.builder()
@@ -347,12 +381,7 @@ public class BookingService {
                 .eventTimestamp(LocalDateTime.now())
                 .build();
 
-        try {
-            kafkaProducerService.publishAppointmentEvent(
-                    KafkaProducerService.TOPIC_APPOINTMENT_CANCELLED, cancelEvent);
-        } catch (Exception e) {
-            log.warn("⚠️ Kafka no disponible: {}", e.getMessage());
-        }
+        kafkaProducerService.publishAppointmentEvent(KafkaProducerService.TOPIC_APPOINTMENT_CANCELLED, cancelEvent);
 
         log.info("❌ Cita cancelada: token={}", token);
 
@@ -367,22 +396,30 @@ public class BookingService {
         Appointment appointment = appointmentRepository.findByToken(token).orElse(null);
         if (appointment == null) return ApiResponse.fail("Cita no encontrada");
 
-        if (appointment.getStatus() == Appointment.AppointmentStatus.cancelled) {
+        if (appointment.getStatus() == AppointmentStatus.cancelled) {
             return ApiResponse.fail("La cita está cancelada");
         }
+        if (appointment.getStatus() == AppointmentStatus.completed || appointment.getStatus() == AppointmentStatus.no_show) {
+            return ApiResponse.fail("Esta cita ya se cerró");
+        }
 
-        if (appointment.getStartTime().isBefore(LocalDateTime.now())) {
+        if (appointment.getStartTime().isBefore(clock.now())) {
             return ApiResponse.fail("No puedes modificar una cita pasada");
         }
 
-        LocalDateTime newStart = LocalDateTime.parse(newStartTimeStr, DateTimeFormatter.ISO_DATE_TIME);
+        LocalDateTime newStart = clock.parseClientDateTime(newStartTimeStr);
         LocalDateTime newEnd = newStart.plusMinutes(appointment.getService().getDuration());
+        Long locationId = appointment.getLocation().getId();
 
-        if (appointment.getStaff() != null) {
-            boolean overlap = appointmentRepository.existsOverlapForStaffExcluding(
-                    appointment.getStaff().getId(), newStart, newEnd, appointment.getId());
-            if (overlap) return ApiResponse.fail("Ese horario ya no está disponible");
-        }
+        String scheduleError = validateSchedule(locationId, newStart, newEnd);
+        if (scheduleError != null) return ApiResponse.fail(scheduleError);
+
+        boolean overlap = appointment.getStaff() != null
+                ? appointmentRepository.existsOverlapForStaffUserExcluding(
+                        appointment.getStaff().getUser().getId(), newStart, newEnd, ACTIVE_STATUSES, appointment.getId())
+                : appointmentRepository.existsOverlapForLocationExcluding(
+                        locationId, newStart, newEnd, ACTIVE_STATUSES, appointment.getId());
+        if (overlap) return ApiResponse.fail("Ese horario ya no está disponible");
 
         appointment.setStartTime(newStart);
         appointment.setEndTime(newEnd);
@@ -397,5 +434,53 @@ public class BookingService {
                         "status", appointment.getStatus().name()
                 )
         ));
+    }
+
+    // -------------------------------------------------------
+    // MIS CITAS (cliente logeado) — /perfil → Historial de citas
+    // -------------------------------------------------------
+    public ApiResponse<?> getMyAppointments(User user) {
+        List<Map<String, Object>> list = appointmentRepository.findByUserIdOrderByStartTimeDesc(user.getId()).stream()
+                .map(a -> {
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", a.getId());
+                    map.put("token", a.getToken());
+                    map.put("business_name", a.getLocation().getBarbershop().getName());
+                    map.put("location_name", a.getLocation().getName());
+                    map.put("service_name", a.getService().getName());
+                    map.put("date", a.getStartTime().format(DISPLAY_DATE_TIME));
+                    map.put("start_time", a.getStartTime().toString());
+                    map.put("status", a.getStatus().name());
+                    return map;
+                })
+                .toList();
+        return ApiResponse.ok("Mis citas", list);
+    }
+
+    // -------------------------------------------------------
+    // HELPERS
+    // -------------------------------------------------------
+    private BarbershopLocation findActiveLocation(Long locationId) {
+        return locationRepository.findById(locationId)
+                .filter(l -> l.getDeletedAt() == null)
+                .orElse(null);
+    }
+
+    /** @return mensaje de error, o null si el horario es válido. */
+    private String validateSchedule(Long locationId, LocalDateTime start, LocalDateTime end) {
+        if (start.isBefore(clock.now())) {
+            return "Ese horario ya pasó, elige otro";
+        }
+        int dayOfWeek = start.getDayOfWeek().getValue() % 7;
+        Availability availability = availabilityRepository
+                .findByLocationIdAndDayOfWeekAndStaffIdIsNullAndIsActiveTrue(locationId, (short) dayOfWeek)
+                .orElse(null);
+        if (availability == null
+                || !end.toLocalDate().equals(start.toLocalDate())
+                || start.toLocalTime().isBefore(availability.getStartTime())
+                || end.toLocalTime().isAfter(availability.getEndTime())) {
+            return "La sucursal no atiende en ese horario";
+        }
+        return null;
     }
 }

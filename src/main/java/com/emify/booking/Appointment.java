@@ -52,6 +52,11 @@ public class Appointment {
     @Builder.Default
     private AppointmentStatus status = AppointmentStatus.pending;
 
+    // Cómo pagó el cliente (solo informativo). Se llena al marcar "Sí llegó"; null en las demás.
+    @Enumerated(EnumType.STRING)
+    @Column(name = "payment_method", length = 20)
+    private PaymentMethod paymentMethod;
+
     @Column(columnDefinition = "TEXT")
     private String notes;
 
@@ -78,7 +83,22 @@ public class Appointment {
         updatedAt = LocalDateTime.now();
     }
 
+    // completed = el cliente sí llegó (cuenta como venta); no_show = no llegó (no cuenta)
     public enum AppointmentStatus {
-        pending, confirmed, cancelled, completed
+        pending, confirmed, cancelled, completed, no_show
     }
-}
+
+    // Informativo: Emify no procesa pagos, solo registra cómo pagó el cliente en el negocio
+    public enum PaymentMethod {
+        efectivo, tarjeta, transferencia;
+
+        public static PaymentMethod parse(String value) {
+            if (value == null || value.isBlank()) return null;
+            try {
+                return PaymentMethod.valueOf(value.trim().toLowerCase());
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
+        }
+    }
+}

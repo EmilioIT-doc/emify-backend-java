@@ -16,6 +16,10 @@ public interface BarbershopLocationRepository extends JpaRepository<BarbershopLo
 
     boolean existsByBarbershopIdAndDeletedAtIsNull(Long barbershopId);
 
+    long countByBarbershopIdAndDeletedAtIsNull(Long barbershopId);
+
+    Optional<BarbershopLocation> findByInviteCodeAndDeletedAtIsNull(String inviteCode);
+
     @Query("SELECT l FROM BarbershopLocation l WHERE l.id = :id AND l.barbershop.owner.id = :ownerId AND l.deletedAt IS NULL")
     Optional<BarbershopLocation> findByIdAndOwnerId(Long id, Long ownerId);
 
@@ -23,4 +27,4 @@ public interface BarbershopLocationRepository extends JpaRepository<BarbershopLo
     @Transactional
     @Query("UPDATE BarbershopLocation l SET l.isDefault = false WHERE l.barbershop.id = :barbershopId")
     void clearDefaultByBarbershopId(Long barbershopId);
-}
+}

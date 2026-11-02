@@ -16,6 +16,8 @@ public interface RestaurantLocationRepository extends JpaRepository<RestaurantLo
 
     boolean existsByRestaurantIdAndDeletedAtIsNull(Long restaurantId);
 
+    long countByRestaurantIdAndDeletedAtIsNull(Long restaurantId);
+
     Optional<RestaurantLocation> findByIdAndDeletedAtIsNull(Long id);
 
     @Query("SELECT l FROM RestaurantLocation l WHERE l.id = :id AND l.restaurant.owner.id = :ownerId AND l.deletedAt IS NULL")
