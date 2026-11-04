@@ -58,6 +58,20 @@ public class TeamController {
                 CurrentUser.require(authentication), RequestValues.toLong(body.get("location_id"))));
     }
 
+    // GET /api/team/invite/{code}  (público) — a qué negocio y sucursal pertenece el código
+    @GetMapping("/invite/{code}")
+    public ResponseEntity<ApiResponse<?>> invite(@PathVariable String code) {
+        return ResponseEntity.ok(teamService.getInvite(code));
+    }
+
+    // POST /api/team/invite/{code}/join  (público)  body: {name, phone, email, password}
+    // Crea la cuenta (o usa la que ya existe con ese correo y contraseña), la une a la sucursal
+    // y regresa un token para entrar directo a su agenda.
+    @PostMapping("/invite/{code}/join")
+    public ResponseEntity<ApiResponse<?>> joinByInvite(@PathVariable String code, @RequestBody Map<String, String> body) {
+        return ResponseEntity.ok(teamService.joinByInvite(code, body));
+    }
+
     // POST /api/team/join   body: {invite_code}
     @PostMapping("/join")
     public ResponseEntity<ApiResponse<?>> join(@RequestBody Map<String, String> body, Authentication authentication) {

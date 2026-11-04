@@ -5,6 +5,7 @@ import com.emify.barbershop.*;
 import com.emify.booking.AppointmentRepository;
 import com.emify.common.ApiException;
 import com.emify.common.BusinessClock;
+import com.emify.security.JwtUtil;
 import com.emify.user.User;
 import com.emify.user.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -47,6 +48,7 @@ public class TeamService {
     private final PasswordEncoder passwordEncoder;
     private final AppointmentRepository appointmentRepository;
     private final BusinessClock clock;
+    private final JwtUtil jwtUtil;
 
     // GET /api/team/location/{id}
     public ApiResponse<?> getTeam(User user, Long locationId) {
@@ -236,6 +238,96 @@ public class TeamService {
                         "barbershop_id", location.getBarbershop().getId()
                 )
         ));
+    }
+
+    // GET /api/team/invite/{code} — público: el barbero ve a qué negocio se va a unir antes de llenar sus datos
+    @Transactional(readOnly = true)
+    public ApiResponse<?> getInvite(String inviteCode) {
+        BarbershopLocation location = locationByInvite(inviteCode);
+        Map<String, Object> loc = new LinkedHashMap<>();
+        loc.put("id", location.getId());
+        loc.put("name", location.getName());
+        loc.put("address", location.getAddress());
+        loc.put("city", location.getCity());
+        loc.put("barbershop_id", location.getBarbershop().getId());
+        loc.put("barbershop_name", location.getBarbershop().getName());
+        return ApiResponse.ok("Código válido", Map.of("location", loc));
+    }
+
+    // POST /api/team/invite/{code}/join — público: unirse sin estar logeado.
+    // - Correo nuevo: crea la cuenta con nombre, teléfono, correo y contraseña (sin verificar el correo:
+    //   el código es la prueba de confianza y el dueño puede quitarlo desde Equipo).
+    //   Si ese teléfono ya era un cliente "guest" (reservó antes), se reutiliza esa cuenta en vez de duplicarla.
+    // - Correo que ya tiene cuenta: se une con esa misma cuenta si la contraseña coincide; si no,
+    //   responde 428 para que el frontend pida "la contraseña de tu cuenta de emify".
+    // Regresa un token para que entre directo a su agenda.
+    @Transactional
+    public ApiResponse<?> joinByInvite(String inviteCode, Map<String, String> body) {
+        BarbershopLocation location = locationByInvite(inviteCode);
+
+        String email = trim(body.get("email"));
+        String password = body.get("password");
+        if (email == null || !email.matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
+            throw ApiException.unprocessable("Escribe un correo válido");
+        }
+        email = email.toLowerCase(Locale.ROOT);
+        if (password == null || password.length() < 6) {
+            throw ApiException.unprocessable("La contraseña debe tener al menos 6 caracteres");
+        }
+
+        User user = userRepository.findByEmail(email).orElse(null);
+        if (user != null) {
+            if (!passwordEncoder.matches(password, user.getPassword())) {
+                throw new ApiException(HttpStatus.PRECONDITION_REQUIRED,
+                        "Ya tienes una cuenta en emify con este correo. Escribe la contraseña de esa cuenta para unirte.");
+            }
+        } else {
+            String name = trim(body.get("name"));
+            String phone = trim(body.get("phone"));
+            if (name == null) throw ApiException.unprocessable("Escribe tu nombre");
+            if (phone == null || phone.replaceAll("\\D", "").length() < 10) {
+                throw ApiException.unprocessable("Escribe tu teléfono a 10 dígitos");
+            }
+            phone = phone.replaceAll("\\D", "");
+
+            User guest = userRepository.findFirstByPhoneOrderByIdAsc(phone)
+                    .filter(u -> u.getEmail() != null && u.getEmail().endsWith("@guest.emify.com"))
+                    .orElse(null);
+            user = guest != null ? guest : User.builder()
+                    .phoneCode("+52")
+                    .isActive(true)
+                    .avatarUrl(AVATARS.get(new Random().nextInt(AVATARS.size())))
+                    .build();
+            user.setName(name);
+            user.setEmail(email);
+            user.setPhone(phone);
+            user.setPassword(passwordEncoder.encode(password));
+            user.setRole(User.Role.barber);
+            // Se marca para distinguirlo del personal "temporal" que crea el dueño (el correo no se verificó)
+            user.setEmailVerifiedAt(clock.now());
+            if (user.getAvatarUrl() == null) user.setAvatarUrl(AVATARS.get(new Random().nextInt(AVATARS.size())));
+            user = userRepository.save(user);
+        }
+
+        // Si ya era parte del equipo de esta sucursal, solo entra
+        boolean alreadyMember = staffRepository.findByUserIdAndLocationId(user.getId(), location.getId())
+                .map(BarbershopStaff::isActive).orElse(false);
+        if (!alreadyMember) joinWithCode(user, location.getInviteCode());
+
+        String token = jwtUtil.generateToken(user, Map.of("role", user.getRole().name(), "userId", user.getId()));
+        Map<String, Object> loc = new LinkedHashMap<>();
+        loc.put("id", location.getId());
+        loc.put("name", location.getName());
+        loc.put("barbershop_id", location.getBarbershop().getId());
+        loc.put("barbershop_name", location.getBarbershop().getName());
+        return ApiResponse.ok("Te uniste a " + location.getName(), Map.of("token", token, "location", loc));
+    }
+
+    private BarbershopLocation locationByInvite(String inviteCode) {
+        String code = trim(inviteCode);
+        if (code == null) throw ApiException.unprocessable("Ingresa el código de invitación");
+        return locationRepository.findByInviteCodeAndDeletedAtIsNull(code.toUpperCase(Locale.ROOT))
+                .orElseThrow(() -> ApiException.notFound("Ese código no existe. Revisa que esté bien escrito."));
     }
 
     // POST /api/team/staff/{id}/remove — baja lógica (borrarlo eliminaría sus citas por el CASCADE)
