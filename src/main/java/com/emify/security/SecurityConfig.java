@@ -39,8 +39,16 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/**").permitAll()
                         .requestMatchers("/api/booking/**").permitAll()
                         .requestMatchers("/api/ordering/**").permitAll()
+                        .requestMatchers("/api/team/invite/**").permitAll() // unirse a un negocio con código, sin sesión
                         .anyRequest().authenticated()
                 )
+                // Sin token o con token vencido/inválido → 401 en JSON (antes caía en 403 genérico).
+                // El frontend usa el 401 para cerrar la sesión y mandar al login.
+                .exceptionHandling(e -> e.authenticationEntryPoint((request, response, ex) -> {
+                    response.setStatus(401);
+                    response.setContentType("application/json;charset=UTF-8");
+                    response.getWriter().write("{\"status\":false,\"message\":\"Tu sesión expiró. Inicia sesión de nuevo.\",\"data\":null}");
+                }))
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
                 )
@@ -66,4 +74,4 @@ public class SecurityConfig {
     public PasswordEncoder passwordEncoder() {
         return new BCryptPasswordEncoder();
     }
-}
+}

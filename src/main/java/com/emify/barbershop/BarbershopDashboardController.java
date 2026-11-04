@@ -2,6 +2,7 @@ package com.emify.barbershop;
 
 import com.emify.auth.dto.ApiResponse;
 import com.emify.common.CurrentUser;
+import com.emify.user.User;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
@@ -23,10 +24,19 @@ public class BarbershopDashboardController {
         return ResponseEntity.ok(dashboardService.getCalendar(CurrentUser.require(authentication), id, date));
     }
 
-    // GET /api/authBarberShop/location/{id}/recent-sales
+    // GET /api/authBarberShop/location/{id}/recent-sales                         → últimos 7 días (formato original)
+    // GET /api/authBarberShop/location/{id}/recent-sales?period=day|week|month|year&date=YYYY-MM-DD
+    //     → el periodo de calendario que contiene "date" (default hoy), comparado con el periodo anterior
     @GetMapping("/recent-sales")
-    public ResponseEntity<ApiResponse<?>> recentSales(@PathVariable Long id, Authentication authentication) {
-        return ResponseEntity.ok(dashboardService.getRecentSales(CurrentUser.require(authentication), id));
+    public ResponseEntity<ApiResponse<?>> recentSales(@PathVariable Long id,
+                                                      @RequestParam(required = false) String period,
+                                                      @RequestParam(required = false) String date,
+                                                      Authentication authentication) {
+        User user = CurrentUser.require(authentication);
+        if (period == null || period.isBlank()) {
+            return ResponseEntity.ok(dashboardService.getRecentSales(user, id));
+        }
+        return ResponseEntity.ok(dashboardService.getSales(user, id, period, date));
     }
 
     // GET /api/authBarberShop/location/{id}/upcoming-appointments

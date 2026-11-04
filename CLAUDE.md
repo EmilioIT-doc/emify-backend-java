@@ -202,7 +202,7 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
 | POST | `/authBarberShop/location/{id}/services/{sid}` · `/{sid}/delete` (también `DELETE /{sid}`) | Dueño |
 | GET/POST | `/authBarberShop/location/{id}/products` · `/{pid}` · `/{pid}/delete` | Dueño (multipart para imagen) |
 | GET | `/authBarberShop/location/{id}/calendar?date=YYYY-MM-DD` | Dueño o personal |
-| GET | `/authBarberShop/location/{id}/recent-sales` | Dueño. 7 días, `previous_total`, `by_payment` |
+| GET | `/authBarberShop/location/{id}/recent-sales` | Dueño. Sin params: últimos 7 días. Con `?period=&date=YYYY-MM-DD`: `day` = horas del horario de ese día · `week` = lun–dom (`closed` en días que no abre) · `month` = ene–dic del año · `year` = últimos 10 años. `total` = suma de la gráfica; `previous_total` = rango anterior hasta el mismo punto; `future`, `is_current`, `by_payment` |
 | GET | `/authBarberShop/location/{id}/upcoming-appointments` | Dueño |
 | GET | `/authBarberShop/location/{id}/top-services` · `/top-staff` · `/clients` | Dueño |
 
@@ -226,7 +226,9 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
 | POST | `/team/location/{id}/owner` | Dueño atiende aquí; 409 si ya atiende en otra; `{move:true}` para cambiarse |
 | GET | `/team/owner/locations` | Dónde atiende el dueño (+ `upcoming_appointments`) |
 | POST | `/team/owner/primary` | `{location_id}`: deja al dueño solo en esa sucursal |
-| POST | `/team/join` | Unirse con código (client → barber) |
+| POST | `/team/join` | Unirse con código estando logeado (client → barber) |
+| GET | `/team/invite/{code}` | **Público.** Datos de la sucursal del código (nombre, negocio, dirección) |
+| POST | `/team/invite/{code}/join` | **Público.** `{name, phone, email, password}`. Correo nuevo → crea cuenta barber (sin verificar correo; reusa al guest con ese teléfono). Correo existente → se une con esa cuenta si la contraseña coincide; si no, **428**. Entra directo al equipo y regresa `{token, location}` |
 | POST | `/team/staff/{id}/remove` | Baja lógica |
 
 **`authRestaurant`** y **`ordering`**: ver `RestaurantController` y `RestaurantOrderingController` (fuera de foco).
@@ -234,7 +236,8 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
 ## 5.3 Seguridad
 
 - `SecurityConfig`: stateless, CSRF apagado, `JwtFilter` antes de `UsernamePasswordAuthenticationFilter`.
-  Públicos: `/api/auth/**`, `/api/booking/**`, `/api/ordering/**`, `/uploads/**`, `/error`.
+  Públicos: `/api/auth/**`, `/api/booking/**`, `/api/ordering/**`, `/api/team/invite/**`, `/uploads/**`, `/error`.
+- Sin token o con token vencido/inválido responde **401** `{status:false, message:"Tu sesión expiró…"}` (entry point en `SecurityConfig`); el frontend limpia la cookie y manda a login.
 - `JwtUtil`: HMAC-SHA con `spring.security.jwt.secret`; `sub` = email; expira en 24 h.
 - `JwtFilter` carga el `User` y lo pone como principal; `CurrentUser.require(auth)` lo obtiene (lanza 401 si falta).
 - CORS en `config/CorsConfig` con `allowedOriginPatterns` (no mezclar con `allowedOrigins`: Spring ignora el segundo).
