@@ -44,14 +44,32 @@ public class BarbershopDashboardService {
     // -------------------------------------------------------
     // CALENDARIO — GET /location/{id}/calendar?date=YYYY-MM-DD
     // -------------------------------------------------------
+    // El dueño ve todo. El barbero ve completas SUS citas y de las de su equipo solo cliente, servicio y horario
+    // (sin teléfono, precio, notas, foto ni método de pago). "my_staff_id" = su registro de personal en esta
+    // sucursal (también el del dueño si atiende aquí), para marcar su columna como "Tú".
     public ApiResponse<?> getCalendar(User user, Long locationId, String date) {
-        access.requireOwnerOrStaff(user, locationId);
+        BarbershopLocation location = access.requireOwnerOrStaff(user, locationId);
+        boolean isOwner = access.isOwner(user, location);
+        Long myStaffId = staffRepository.findByUserIdAndLocationId(user.getId(), locationId)
+                .filter(BarbershopStaff::isActive)
+                .map(BarbershopStaff::getId)
+                .orElse(null);
         LocalDate day = date == null || date.isBlank() ? clock.today() : clock.parseDate(date);
 
         List<Map<String, Object>> appointments = appointmentRepository
                 .findByLocationBetween(locationId, day.atStartOfDay(), day.plusDays(1).atStartOfDay(), CALENDAR_STATUSES)
                 .stream()
-                .map(this::calendarAppointment)
+                .map(a -> {
+                    Map<String, Object> map = calendarAppointment(a);
+                    boolean mine = myStaffId != null && a.getStaff() != null && myStaffId.equals(a.getStaff().getId());
+                    map.put("is_mine", mine);
+                    if (!isOwner && !mine) {
+                        for (String key : List.of("token", "phone", "price", "payment_method", "notes", "reference_image_url")) {
+                            map.remove(key);
+                        }
+                    }
+                    return map;
+                })
                 .toList();
 
         List<Map<String, Object>> staff = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId).stream()
@@ -65,10 +83,19 @@ public class BarbershopDashboardService {
                 })
                 .toList();
 
+        // Horario de la sucursal ese día (null = cierra). Sirve para los huecos libres y el rango de horas.
+        short dow = (short) (day.getDayOfWeek().getValue() % 7);
+        Optional<Availability> schedule = availabilityRepository
+                .findByLocationIdAndDayOfWeekAndStaffIdIsNullAndIsActiveTrue(locationId, dow);
+
         Map<String, Object> data = new LinkedHashMap<>();
         data.put("date", day.toString());
         data.put("appointments", appointments);
         data.put("staff", staff);
+        data.put("is_owner", isOwner);
+        data.put("my_staff_id", myStaffId);
+        data.put("opens_at", schedule.map(a -> a.getStartTime().format(HH_MM)).orElse(null));
+        data.put("closes_at", schedule.map(a -> a.getEndTime().format(HH_MM)).orElse(null));
         return ApiResponse.ok("Calendario", data);
     }
 
