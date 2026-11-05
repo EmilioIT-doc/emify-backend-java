@@ -107,13 +107,18 @@ public class BookingService {
         // Availability
         List<Map<String, Object>> availabilityList = availability.stream()
                 .sorted(Comparator.comparing(Availability::getDayOfWeek))
-                .map(a -> Map.of(
-                        "id", (Object) a.getId(),
-                        "day_of_week", a.getDayOfWeek(),
-                        "start_time", a.getStartTime().format(HH_MM),
-                        "end_time", a.getEndTime().format(HH_MM),
-                        "is_active", a.isActive()
-                )).toList();
+                .map(a -> {
+                    // LinkedHashMap: break_start/break_end pueden ser null (día sin hora de comida)
+                    Map<String, Object> m = new LinkedHashMap<>();
+                    m.put("id", a.getId());
+                    m.put("day_of_week", a.getDayOfWeek());
+                    m.put("start_time", a.getStartTime().format(HH_MM));
+                    m.put("end_time", a.getEndTime().format(HH_MM));
+                    m.put("break_start", a.getBreakStart() != null ? a.getBreakStart().format(HH_MM) : null);
+                    m.put("break_end", a.getBreakEnd() != null ? a.getBreakEnd().format(HH_MM) : null);
+                    m.put("is_active", a.isActive());
+                    return m;
+                }).toList();
 
         // Location map
         Map<String, Object> locationMap = new LinkedHashMap<>();
@@ -127,6 +132,7 @@ public class BookingService {
         locationMap.put("serves_physical", location.isServesPhysical());
         locationMap.put("serves_home", location.isServesHome());
         locationMap.put("serves_online", location.isServesOnline());
+        locationMap.put("buffer_minutes", bufferOf(location));
         locationMap.put("services", serviceList);
         locationMap.put("staff", staffList);
         if (location.getBarbershop() != null) {
@@ -159,15 +165,30 @@ public class BookingService {
             return ApiResponse.ok("No hay disponibilidad", Map.of("slots", List.of()));
         }
 
-        // Generar slots
+        // Tiempo entre citas configurado por la sucursal (10 min por default)
+        BarbershopLocation slotLocation = findActiveLocation(locationId);
+        final int buffer = bufferOf(slotLocation);
+
+        // Generar slots: cada uno dura el servicio y el siguiente empieza después del descanso.
+        // Si un slot cae sobre la hora de comida, se brinca al final de la comida.
         List<String> slots = new ArrayList<>();
         LocalTime end = availability.getEndTime();
         LocalTime current = availability.getStartTime();
+        LocalTime breakStart = availability.getBreakStart();
+        LocalTime breakEnd = availability.getBreakEnd();
 
         while (!current.plusMinutes(slotMinutes).isAfter(end)
                 && current.plusMinutes(slotMinutes).isAfter(current)) { // evita dar la vuelta a medianoche
+            LocalTime slotEnd = current.plusMinutes(slotMinutes);
+            if (breakStart != null && breakEnd != null
+                    && current.isBefore(breakEnd) && slotEnd.isAfter(breakStart)) {
+                current = breakEnd;
+                continue;
+            }
             slots.add(current.format(HH_MM));
-            current = current.plusMinutes(slotMinutes);
+            LocalTime next = slotEnd.plusMinutes(buffer);
+            if (!next.isAfter(current)) break; // dio la vuelta a medianoche
+            current = next;
         }
 
         // Citas reservadas ese día
@@ -183,14 +204,13 @@ public class BookingService {
                     ? appointmentRepository.findByLocationAndStaffBetween(locationId, staffId, from, to, ACTIVE_STATUSES)
                     : appointmentRepository.findByLocationBetween(locationId, from, to, ACTIVE_STATUSES);
 
-        // Filtrar slots bloqueados (con buffer de 10 minutos)
-        int buffer = 10;
+        // Filtrar slots bloqueados: entre una cita y otra debe quedar el tiempo de descanso
         List<String> availableSlots = slots.stream().filter(slot -> {
             LocalDateTime slotStart = localDate.atTime(LocalTime.parse(slot));
             LocalDateTime slotEnd = slotStart.plusMinutes(slotMinutes);
 
             for (Appointment appt : bookedAppointments) {
-                LocalDateTime apptStart = appt.getStartTime();
+                LocalDateTime apptStart = appt.getStartTime().minusMinutes(buffer);
                 LocalDateTime apptEnd = appt.getEndTime().plusMinutes(buffer);
                 if (slotStart.isBefore(apptEnd) && slotEnd.isAfter(apptStart)) {
                     return false;
@@ -240,12 +260,16 @@ public class BookingService {
         String scheduleError = validateSchedule(locationId, startTime, endTime);
         if (scheduleError != null) return ApiResponse.fail(scheduleError);
 
-        // Verificar overlap (con barbero: su agenda en cualquier sucursal; sin barbero: la de la sucursal)
+        // Verificar overlap (con barbero: su agenda en cualquier sucursal; sin barbero: la de la sucursal).
+        // La ventana se amplía con el tiempo entre citas de la sucursal.
+        int buffer = bufferOf(location);
+        LocalDateTime checkStart = startTime.minusMinutes(buffer);
+        LocalDateTime checkEnd = endTime.plusMinutes(buffer);
         if (staff != null) {
-            if (appointmentRepository.existsOverlapForStaffUser(staff.getUser().getId(), startTime, endTime, ACTIVE_STATUSES)) {
+            if (appointmentRepository.existsOverlapForStaffUser(staff.getUser().getId(), checkStart, checkEnd, ACTIVE_STATUSES)) {
                 return ApiResponse.fail("El barbero ya tiene una cita en ese horario");
             }
-        } else if (appointmentRepository.existsOverlapForLocation(locationId, startTime, endTime, ACTIVE_STATUSES)) {
+        } else if (appointmentRepository.existsOverlapForLocation(locationId, checkStart, checkEnd, ACTIVE_STATUSES)) {
             return ApiResponse.fail("Ese horario ya está ocupado, elige otro");
         }
 
@@ -414,11 +438,14 @@ public class BookingService {
         String scheduleError = validateSchedule(locationId, newStart, newEnd);
         if (scheduleError != null) return ApiResponse.fail(scheduleError);
 
+        int buffer = bufferOf(appointment.getLocation());
+        LocalDateTime checkStart = newStart.minusMinutes(buffer);
+        LocalDateTime checkEnd = newEnd.plusMinutes(buffer);
         boolean overlap = appointment.getStaff() != null
                 ? appointmentRepository.existsOverlapForStaffUserExcluding(
-                        appointment.getStaff().getUser().getId(), newStart, newEnd, ACTIVE_STATUSES, appointment.getId())
+                        appointment.getStaff().getUser().getId(), checkStart, checkEnd, ACTIVE_STATUSES, appointment.getId())
                 : appointmentRepository.existsOverlapForLocationExcluding(
-                        locationId, newStart, newEnd, ACTIVE_STATUSES, appointment.getId());
+                        locationId, checkStart, checkEnd, ACTIVE_STATUSES, appointment.getId());
         if (overlap) return ApiResponse.fail("Ese horario ya no está disponible");
 
         appointment.setStartTime(newStart);
@@ -481,6 +508,17 @@ public class BookingService {
                 || end.toLocalTime().isAfter(availability.getEndTime())) {
             return "La sucursal no atiende en ese horario";
         }
+        if (availability.getBreakStart() != null && availability.getBreakEnd() != null
+                && start.toLocalTime().isBefore(availability.getBreakEnd())
+                && end.toLocalTime().isAfter(availability.getBreakStart())) {
+            return "Ese horario cae en la hora de comida, elige otro";
+        }
         return null;
+    }
+
+    /** Minutos de descanso entre citas de la sucursal (10 si no está configurado). */
+    private int bufferOf(BarbershopLocation location) {
+        if (location == null || location.getBufferMinutes() == null) return 10;
+        return Math.max(0, location.getBufferMinutes());
     }
 }

@@ -1,6 +1,10 @@
 package com.emify.booking;
 
 import com.emify.auth.dto.ApiResponse;
+import com.emify.barbershop.BarberService;
+import com.emify.barbershop.BarbershopStaff;
+import com.emify.barbershop.BarbershopStaffRepository;
+import com.emify.barbershop.ServiceRepository;
 import com.emify.booking.Appointment.AppointmentStatus;
 import com.emify.booking.Appointment.PaymentMethod;
 import com.emify.common.ApiException;
@@ -8,6 +12,7 @@ import com.emify.common.BusinessClock;
 import com.emify.kafka.AppointmentEvent;
 import com.emify.kafka.KafkaProducerService;
 import com.emify.user.User;
+import com.emify.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -18,6 +23,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static com.emify.booking.AppointmentRepository.ACTIVE_STATUSES;
 
@@ -34,9 +40,16 @@ public class AttendanceService {
 
     private static final DateTimeFormatter HH_MM = DateTimeFormatter.ofPattern("HH:mm");
 
+    /** Teléfono con el que se registran todos los clientes imprevistos (sin cita): así se cuentan aparte. */
+    public static final String WALK_IN_PHONE = "0000000000";
+    public static final String WALK_IN_NAME = "Cliente imprevisto";
+
     private final AppointmentRepository appointmentRepository;
     private final KafkaProducerService kafkaProducerService;
     private final BusinessClock clock;
+    private final BarbershopStaffRepository staffRepository;
+    private final ServiceRepository serviceRepository;
+    private final UserRepository userRepository;
 
     // GET /api/attendance/pending
     public ApiResponse<?> getPending(User user) {
@@ -97,6 +110,87 @@ public class AttendanceService {
                 attended ? paymentMethod : "", user.getEmail());
         return ApiResponse.ok(attended ? "Asistencia registrada" : "Marcada como no llegó",
                 Map.of("appointment", toMap(appointment)));
+    }
+
+    /**
+     * POST /api/attendance/walk-in — cliente imprevisto: alguien que llegó sin cita y el barbero atendió.
+     * Se guarda como cita ya atendida (cuenta como venta) del barbero que la registra, con el cliente
+     * genérico de teléfono 0000000000 ("Cliente imprevisto"); el nombre opcional va en las notas.
+     */
+    @Transactional
+    public ApiResponse<?> registerWalkIn(User user, Long locationId, Long serviceId, String startTimeValue,
+                                         String paymentMethodValue, String clientName) {
+        if (locationId == null) throw ApiException.unprocessable("Falta la sucursal");
+        if (serviceId == null) throw ApiException.unprocessable("Elige el servicio que hiciste");
+
+        PaymentMethod paymentMethod = PaymentMethod.parse(paymentMethodValue);
+        if (paymentMethod == null) {
+            throw ApiException.unprocessable("Indica cómo pagó el cliente: efectivo, tarjeta o transferencia");
+        }
+
+        BarbershopStaff staff = staffRepository.findByUserIdAndLocationId(user.getId(), locationId)
+                .filter(BarbershopStaff::isActive)
+                .orElseThrow(() -> ApiException.notFound("No atiendes en esta sucursal"));
+
+        BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
+                .filter(BarberService::isActive)
+                .orElseThrow(() -> ApiException.notFound("Servicio no encontrado"));
+
+        LocalDateTime now = clock.now();
+        LocalDateTime start = (startTimeValue == null || startTimeValue.isBlank())
+                ? now.withSecond(0).withNano(0)
+                : clock.parseClientDateTime(startTimeValue);
+        if (start.isAfter(now.plusMinutes(5))) {
+            throw ApiException.unprocessable("Registra al cliente cuando ya llegó: la hora no puede ser después de ahora");
+        }
+        if (start.isBefore(now.minusDays(7))) {
+            throw ApiException.unprocessable("Solo puedes registrar clientes imprevistos de los últimos 7 días");
+        }
+        LocalDateTime end = start.plusMinutes(service.getDuration());
+
+        User client = userRepository.findFirstByPhoneOrderByIdAsc(WALK_IN_PHONE)
+                .orElseGet(() -> userRepository.save(User.builder()
+                        .phone(WALK_IN_PHONE)
+                        .name(WALK_IN_NAME)
+                        .email(WALK_IN_PHONE + "@guest.emify.com")
+                        .password("$2a$10$guest_placeholder_password")
+                        .role(User.Role.client)
+                        .isActive(true)
+                        .build()));
+
+        String name = clientName != null ? clientName.trim() : "";
+        Appointment appointment = Appointment.builder()
+                .user(client)
+                .staff(staff)
+                .service(service)
+                .location(staff.getLocation())
+                .startTime(start)
+                .endTime(end)
+                .status(AppointmentStatus.completed)
+                .paymentMethod(paymentMethod)
+                .notes(name.isEmpty() ? WALK_IN_NAME : WALK_IN_NAME + ": " + name)
+                .token(UUID.randomUUID().toString().replace("-", "").substring(0, 32))
+                .build();
+        appointmentRepository.save(appointment);
+
+        kafkaProducerService.publishAppointmentEvent(KafkaProducerService.TOPIC_APPOINTMENT_COMPLETED,
+                AppointmentEvent.builder()
+                        .eventType("appointment.completed")
+                        .appointmentId(appointment.getId())
+                        .locationId(locationId)
+                        .serviceId(service.getId())
+                        .serviceName(service.getName())
+                        .userId(client.getId())
+                        .clientName(client.getName())
+                        .staffId(staff.getId())
+                        .startTime(start)
+                        .endTime(end)
+                        .status("completed")
+                        .eventTimestamp(LocalDateTime.now())
+                        .build());
+
+        log.info("🚶 Cliente imprevisto: {} en sucursal {} ({}) por {}", service.getName(), locationId, paymentMethod, user.getEmail());
+        return ApiResponse.ok("Cliente imprevisto registrado", Map.of("appointment", toMap(appointment)));
     }
 
     /** El dueño de la barbería o el barbero asignado a la cita. */

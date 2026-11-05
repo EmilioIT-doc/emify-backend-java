@@ -90,7 +90,8 @@ Otras propiedades relevantes de `application.yml`:
     reconstruir la tabla (ejemplo: `db/sqlite/V5__appointment_no_show.sql`).
   - `ALTER TYPE ... ADD VALUE` en PostgreSQL dentro de una transacción requiere PostgreSQL 12 o mayor.
 - Versiones actuales: V1 esquema base (barbería y usuarios), V2–V4 restaurante, V5 estado `no_show`,
-  V6 `appointments.payment_method`.
+  V6 `appointments.payment_method`, V7 hora de comida (`availability.break_start/break_end`) y tiempo entre
+  citas por sucursal (`barbershop_locations.buffer_minutes`, default 10).
 - En PostgreSQL los enums son nativos (`user_role`, `staff_role`, `appointment_status`, `service_type_enum`,
   `barbershop_image_type`). Las entidades los mapean con
   `@Enumerated(EnumType.STRING) @JdbcTypeCode(SqlTypes.NAMED_ENUM)`. **Usa ese mismo patrón** para enums
@@ -159,13 +160,13 @@ Otras propiedades relevantes de `application.yml`:
 | `users` | `User` | `role` enum `user_role` (`client`/`barber`/`owner`), `avatar_url` (una de 4 URLs de S3), `phone`, `email_verified_at`. Los clientes "guest" usan `{telefono}@guest.emify.com` |
 | `email_verification_codes` | `EmailVerificationCode` | Código de 6 dígitos, expira en 10 min |
 | `barbershops` | `Barbershop` | `owner_id` (no único: varias marcas por dueño), `subscription_status`, `last_payment_id` |
-| `barbershop_locations` | `BarbershopLocation` | Sucursal: dirección, teléfono, `is_default`, `serves_physical`/`serves_home`, `invite_code` (8), `deleted_at` (borrado lógico) |
+| `barbershop_locations` | `BarbershopLocation` | Sucursal: dirección, teléfono, `is_default`, `serves_physical`/`serves_home`, `invite_code` (8), `buffer_minutes` (V7, descanso entre citas, default 10), `deleted_at` (borrado lógico) |
 | `barbershop_images` | — | enum `barbershop_image_type` (`logo`/`banner`/`gallery`); poco usada |
 | `services` | `BarberService` | Catálogo por sucursal: nombre, precio, `duration` (min), `service_type` (`service_type_enum`), `is_active` |
 | `products` | `Product` | Productos por sucursal (con imagen) |
 | `barbershop_staff` | `BarbershopStaff` | (usuario, sucursal), `staff_role` (siempre `barber`), `is_active` (baja lógica) |
 | `staff_services` | — | Relación personal ↔ servicios (sin uso real todavía) |
-| `availability` | `Availability` | Horario semanal: `day_of_week` 0=domingo…6, `start_time`, `end_time`; `staff_id NULL` = horario de la sucursal |
+| `availability` | `Availability` | Horario semanal: `day_of_week` 0=domingo…6, `start_time`, `end_time`, `break_start`/`break_end` (V7, comida; NULL = sin comida); `staff_id NULL` = horario de la sucursal. Una fila por día |
 | `appointments` | `Appointment` | `location_id`, `service_id`, `staff_id` (nullable), `client_id`, `start_time`, `end_time`, `status`, `payment_method` (V6), `token` (único, público), `reference_image` |
 | `restaurants`, `restaurant_locations`, `menu_categories`, `menu_items`, `restaurant_availability`, `restaurant_orders`, `restaurant_order_items` | `restaurant/*` | Rubro restaurante (V2–V4) |
 
@@ -216,7 +217,14 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
 | GET | `/booking/appointment/{token}` | Ver cita |
 | POST | `/booking/appointment/{token}/cancel` · `/reschedule` | Solo citas futuras no cerradas |
 
-**`attendance`** (`AttendanceController`): `GET /attendance/pending`, `POST /attendance/{id}` `{attended, payment_method}`.
+**`attendance`** (`AttendanceController`): `GET /attendance/pending`, `POST /attendance/{id}` `{attended, payment_method}`,
+`POST /attendance/walk-in` `{location_id, service_id, start_time?, payment_method, client_name?}` = **cliente imprevisto**
+(llegó sin cita): cita `completed` del barbero que la registra (debe ser personal activo de la sucursal), hora de
+hasta 7 días atrás y no futura, cliente genérico con teléfono `0000000000` ("Cliente imprevisto"; el nombre opcional
+va en `notes`). Así se cuentan los imprevistos por barbero.
+
+**`content`** (`ContentController`): `GET /content/barber-phrases` → `{phrases: [{kind: frase|dato, text}], rotate_seconds}`.
+Frases que rotan en "Mi agenda" del barbero cuando tiene el día libre (lista fija en el código).
 
 **`team`** (`TeamController`)
 | Método | Ruta | Qué hace |
@@ -274,10 +282,15 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
    - un `invite_code` de 8 caracteres;
    - **7 servicios por default** (Corte, Barba, etc.);
    - la primera queda como `is_default`.
-4. `location/{id}/schedule`: horario semanal (día 0 = domingo … 6 = sábado, `start_time` < `end_time`).
+4. Servicios: el wizard deja activos los que elige el dueño (con su precio/duración) y desactiva los demás
+   default con `services/{sid}` (`is_active=false`).
+5. `location/{id}/schedule`: `{schedule: [{day_of_week, enabled, start_time, end_time, break_start?, break_end?}],
+   buffer_minutes?}`. Horario por día (0 = domingo … 6 = sábado, `start_time` < `end_time`); la comida debe quedar
+   dentro del horario del día. `buffer_minutes` (0–120) es opcional: si no viene se conserva el de la sucursal.
    Se guarda en `availability` con `staff_id = NULL` (es el horario de la sucursal).
-5. "¿Quién atiende?": el dueño elige **una** sucursal donde atiende (`POST /api/team/location/{id}/owner`)
-   y puede crear cuentas de barberos en cada sucursal. Si omite el paso, queda solo en la predeterminada.
+6. Finalizar (pantalla de revisión): si el dueño no atiende en ninguna sucursal queda en la predeterminada
+   (`POST /api/team/location/{id}/owner`; 409 = ya atiende en otra y se respeta). Con una sucursal sin barberos
+   se ofrece invitar; con varias, se avisa qué sucursal se quedó sin nadie. Ya no existe el paso "¿Quién atiende?".
 
 ### Personal (`team`)
 - En la BD todo el personal tiene `staff_role = barber`. La etiqueta que ve el frontend se calcula:
@@ -299,8 +312,11 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
 ### Reservas (`booking`, públicas)
 - La página pública es `/book?id={locationId}`. `GET /booking/location/{id}` regresa servicios activos,
   personal activo y horario.
-- **Horarios disponibles** (`/slots`): se generan cada `duration` minutos dentro del horario del día y se quitan
-  los que chocan con citas `pending`/`confirmed`, con un **colchón de 10 min** después de cada cita.
+- **Horarios disponibles** (`/slots`): empiezan a la apertura; cada uno dura `duration` y el siguiente empieza tras
+  el **tiempo entre citas** de la sucursal (`buffer_minutes`, 10 por default). Si un horario cae en la comida se
+  brinca al final de la comida. Se quitan los que chocan con citas `pending`/`confirmed` dejando ese mismo
+  descanso antes y después de cada cita. Crear y reagendar validan el empalme con la misma ventana ampliada, y
+  `validateSchedule` rechaza citas que caen en la comida.
   Si se manda `staff_id`, se considera la agenda de **esa persona en todas sus sucursales**.
 - **Crear cita:**
   - Valida que el servicio y el barbero pertenezcan a la sucursal, que no sea en el pasado y que caiga dentro del horario.

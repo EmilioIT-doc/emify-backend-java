@@ -33,6 +33,13 @@ public class Availability {
     @Column(name = "end_time", nullable = false)
     private LocalTime endTime;
 
+    // Hora de comida del día (V7). Ambas null = sin comida; en ese rango no se puede reservar.
+    @Column(name = "break_start")
+    private LocalTime breakStart;
+
+    @Column(name = "break_end")
+    private LocalTime breakEnd;
+
     @Column(name = "is_active")
     @Builder.Default
     private boolean isActive = true;

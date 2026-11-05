@@ -259,11 +259,24 @@ public class BarbershopService {
     // -------------------------------------------------------
     @Transactional
     public ApiResponse<?> saveSchedule(User user, Long locationId, List<Map<String, Object>> schedule) {
+        return saveSchedule(user, locationId, schedule, null);
+    }
+
+    /**
+     * Guarda el horario semanal de la sucursal. Cada día puede traer su hora de comida
+     * (break_start / break_end, opcionales). bufferMinutes = tiempo entre citas; null = no cambiarlo.
+     */
+    @Transactional
+    public ApiResponse<?> saveSchedule(User user, Long locationId, List<Map<String, Object>> schedule,
+                                       Integer bufferMinutes) {
         BarbershopLocation location = locationRepository
                 .findByIdAndOwnerId(locationId, user.getId()).orElse(null);
 
         if (location == null) {
             return ApiResponse.fail("Sucursal no encontrada");
+        }
+        if (bufferMinutes != null && (bufferMinutes < 0 || bufferMinutes > 120)) {
+            return ApiResponse.fail("El tiempo entre citas debe estar entre 0 y 120 minutos");
         }
 
         // Validar todo antes de borrar el horario anterior
@@ -286,18 +299,47 @@ public class BarbershopService {
             if (!start.isBefore(end)) {
                 return ApiResponse.fail("La hora de apertura debe ser antes que la de cierre");
             }
+
+            // Hora de comida (opcional): debe quedar dentro del horario del día
+            LocalTime breakStart = null;
+            LocalTime breakEnd = null;
+            Object rawBreakStart = day.get("break_start");
+            Object rawBreakEnd = day.get("break_end");
+            if (rawBreakStart != null && rawBreakEnd != null
+                    && !String.valueOf(rawBreakStart).isBlank() && !String.valueOf(rawBreakEnd).isBlank()) {
+                try {
+                    breakStart = LocalTime.parse(String.valueOf(rawBreakStart));
+                    breakEnd = LocalTime.parse(String.valueOf(rawBreakEnd));
+                } catch (Exception e) {
+                    return ApiResponse.fail("Hora de comida inválida, usa el formato HH:mm");
+                }
+                if (!breakStart.isBefore(breakEnd)) {
+                    return ApiResponse.fail("La comida debe terminar después de empezar");
+                }
+                if (breakStart.isBefore(start) || breakEnd.isAfter(end)) {
+                    return ApiResponse.fail("La hora de comida debe quedar dentro del horario del día");
+                }
+            }
+
             newSchedule.add(Availability.builder()
                     .locationId(locationId)
                     .staffId(null)
                     .dayOfWeek(number.shortValue())
                     .startTime(start)
                     .endTime(end)
+                    .breakStart(breakStart)
+                    .breakEnd(breakEnd)
                     .isActive(true)
                     .build());
         }
 
         availabilityRepository.deleteByLocationIdAndStaffIdIsNull(locationId);
         availabilityRepository.saveAll(newSchedule);
+
+        if (bufferMinutes != null) {
+            location.setBufferMinutes(bufferMinutes);
+            locationRepository.save(location);
+        }
 
         return ApiResponse.ok("Horario guardado exitosamente", null);
     }
@@ -377,6 +419,7 @@ public class BarbershopService {
         map.put("serves_online", l.isServesOnline());
         map.put("latitude", l.getLatitude());
         map.put("longitude", l.getLongitude());
+        map.put("buffer_minutes", l.getBufferMinutes() != null ? l.getBufferMinutes() : 10);
 
         // Para el aviso del dashboard: el dueño atendiendo en varias sucursales
         Long ownerId = l.getBarbershop().getOwner().getId();

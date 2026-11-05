@@ -78,6 +78,11 @@ public class BarbershopLocation {
     @Column(precision = 10, scale = 7)
     private BigDecimal longitude;
 
+    // Minutos de descanso entre citas (V7). Se usa al generar horarios y al validar empalmes.
+    @Column(name = "buffer_minutes")
+    @Builder.Default
+    private Integer bufferMinutes = 10;
+
     @Column(name = "deleted_at")
     private LocalDateTime deletedAt;
 

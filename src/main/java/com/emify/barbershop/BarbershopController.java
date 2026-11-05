@@ -116,17 +116,19 @@ public class BarbershopController {
     @PostMapping("/location/{id}/schedule")
     public ResponseEntity<ApiResponse<?>> saveSchedule(
             @PathVariable Long id,
-            @RequestBody Map<String, List<Map<String, Object>>> body,
+            @RequestBody Map<String, Object> body,
             Authentication authentication) {
 
         User user = (User) authentication.getPrincipal();
-        List<Map<String, Object>> schedule = body.get("schedule");
-
-        if (schedule == null) {
+        if (!(body.get("schedule") instanceof List<?> rawSchedule)) {
             return ResponseEntity.badRequest().body(ApiResponse.fail("El campo schedule es requerido"));
         }
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> schedule = (List<Map<String, Object>>) rawSchedule;
+        // Opcional: si no viene, se conserva el tiempo entre citas que ya tenía la sucursal
+        Integer bufferMinutes = body.get("buffer_minutes") instanceof Number n ? n.intValue() : null;
 
-        ApiResponse<?> response = barbershopService.saveSchedule(user, id, schedule);
+        ApiResponse<?> response = barbershopService.saveSchedule(user, id, schedule, bufferMinutes);
         return ResponseEntity.ok(response);
     }
 

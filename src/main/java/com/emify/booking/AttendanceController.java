@@ -23,6 +23,26 @@ public class AttendanceController {
         return ResponseEntity.ok(attendanceService.getPending(CurrentUser.require(authentication)));
     }
 
+    // POST /api/attendance/walk-in — cliente imprevisto (llegó sin cita)
+    //   body: {"location_id": 1, "service_id": 2, "start_time": "2026-11-05T13:20:00" (opcional = ahora),
+    //          "payment_method": "efectivo"|"tarjeta"|"transferencia", "client_name": "opcional"}
+    @PostMapping("/walk-in")
+    public ResponseEntity<ApiResponse<?>> walkIn(@RequestBody Map<String, Object> body, Authentication authentication) {
+        return ResponseEntity.ok(attendanceService.registerWalkIn(
+                CurrentUser.require(authentication),
+                asLong(body.get("location_id")),
+                asLong(body.get("service_id")),
+                body.get("start_time") != null ? body.get("start_time").toString() : null,
+                body.get("payment_method") != null ? body.get("payment_method").toString() : null,
+                body.get("client_name") != null ? body.get("client_name").toString() : null));
+    }
+
+    private static Long asLong(Object value) {
+        if (value instanceof Number n) return n.longValue();
+        if (value == null || value.toString().isBlank()) return null;
+        try { return Long.valueOf(value.toString()); } catch (NumberFormatException e) { return null; }
+    }
+
     // POST /api/attendance/{id}
     //   body: {"attended": true, "payment_method": "efectivo"|"tarjeta"|"transferencia"} → sí llegó (cuenta como venta)
     //   body: {"attended": false}                                                       → no llegó
