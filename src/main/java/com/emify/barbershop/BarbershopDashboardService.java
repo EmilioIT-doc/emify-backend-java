@@ -2,6 +2,9 @@ package com.emify.barbershop;
 
 import com.emify.auth.dto.ApiResponse;
 import com.emify.booking.Appointment;
+import com.emify.booking.AppointmentImage;
+import com.emify.booking.AppointmentImageRepository;
+import com.emify.booking.AppointmentProductRepository;
 import com.emify.booking.AppointmentRepository;
 import com.emify.common.ApiException;
 import com.emify.common.BusinessClock;
@@ -39,6 +42,8 @@ public class BarbershopDashboardService {
     private final AppointmentRepository appointmentRepository;
     private final BarbershopStaffRepository staffRepository;
     private final AvailabilityRepository availabilityRepository;
+    private final AppointmentImageRepository appointmentImageRepository;
+    private final AppointmentProductRepository appointmentProductRepository;
     private final BusinessClock clock;
 
     // -------------------------------------------------------
@@ -64,7 +69,8 @@ public class BarbershopDashboardService {
                     boolean mine = myStaffId != null && a.getStaff() != null && myStaffId.equals(a.getStaff().getId());
                     map.put("is_mine", mine);
                     if (!isOwner && !mine) {
-                        for (String key : List.of("token", "phone", "price", "payment_method", "notes", "reference_image_url")) {
+                        for (String key : List.of("token", "phone", "price", "payment_method", "notes", "reference_image_url",
+                                "reference_images", "products")) {
                             map.remove(key);
                         }
                     }
@@ -439,6 +445,25 @@ public class BarbershopDashboardService {
         map.put("payment_method", a.getPaymentMethod() != null ? a.getPaymentMethod().name() : null);
         map.put("notes", a.getNotes());
         map.put("reference_image_url", a.getReferenceImageUrl());
+        // V8: visita con varios servicios (citas encadenadas). Fotos de referencia y productos son de toda la visita.
+        map.put("group_token", a.getGroupToken());
+        List<Appointment> group = a.getGroupToken() != null
+                ? appointmentRepository.findByGroupTokenOrderByStartTimeAsc(a.getGroupToken())
+                : List.of(a);
+        List<Long> groupIds = group.stream().map(Appointment::getId).toList();
+        map.put("group_services", group.stream().map(x -> x.getService().getName()).toList());
+        map.put("reference_images", appointmentImageRepository.findByAppointmentIdInOrderByIdAsc(groupIds).stream()
+                .map(AppointmentImage::getImageUrl).toList());
+        map.put("products", appointmentProductRepository.findByAppointmentIdInOrderByIdAsc(groupIds).stream()
+                .map(p -> {
+                    Map<String, Object> pm = new LinkedHashMap<>();
+                    pm.put("name", p.getProductName());
+                    pm.put("quantity", p.getQuantity());
+                    pm.put("unit_price", p.getUnitPrice());
+                    pm.put("total", p.getTotal());
+                    return pm;
+                })
+                .toList());
         return map;
     }
 

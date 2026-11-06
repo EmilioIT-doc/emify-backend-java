@@ -18,12 +18,17 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static com.emify.booking.AppointmentRepository.ACTIVE_STATUSES;
 
@@ -52,12 +57,23 @@ public class AttendanceService {
     private final UserRepository userRepository;
 
     // GET /api/attendance/pending
+    // Una visita con varios servicios (mismo group_token) sale una sola vez y hasta que termina el último.
     public ApiResponse<?> getPending(User user) {
-        List<Map<String, Object>> pending = appointmentRepository
-                .findPendingAttendance(user.getId(), clock.now(), ACTIVE_STATUSES)
-                .stream()
-                .map(this::toMap)
-                .toList();
+        LocalDateTime now = clock.now();
+        Set<String> seenGroups = new HashSet<>();
+        List<Map<String, Object>> pending = new ArrayList<>();
+        for (Appointment a : appointmentRepository.findPendingAttendance(user.getId(), now, ACTIVE_STATUSES)) {
+            if (a.getGroupToken() == null) {
+                pending.add(toMap(a));
+                continue;
+            }
+            if (!seenGroups.add(a.getGroupToken())) continue;
+            List<Appointment> open = appointmentRepository.findByGroupTokenOrderByStartTimeAsc(a.getGroupToken()).stream()
+                    .filter(x -> ACTIVE_STATUSES.contains(x.getStatus()))
+                    .toList();
+            if (open.isEmpty() || open.get(open.size() - 1).getEndTime().isAfter(now)) continue;
+            pending.add(groupMap(open));
+        }
         return ApiResponse.ok("Citas por confirmar asistencia", Map.of("appointments", pending));
     }
 
@@ -87,6 +103,17 @@ public class AttendanceService {
         appointment.setStatus(newStatus);
         appointment.setPaymentMethod(attended ? paymentMethod : null);
         appointmentRepository.save(appointment);
+
+        // Visita con varios servicios: lo mismo para los demás servicios que ya empezaron
+        if (appointment.getGroupToken() != null) {
+            for (Appointment other : appointmentRepository.findByGroupTokenOrderByStartTimeAsc(appointment.getGroupToken())) {
+                if (other.getId().equals(appointment.getId())) continue;
+                if (other.getStatus() == AppointmentStatus.cancelled || other.getStartTime().isAfter(clock.now())) continue;
+                other.setStatus(newStatus);
+                other.setPaymentMethod(attended ? paymentMethod : null);
+                appointmentRepository.save(other);
+            }
+        }
 
         if (attended) {
             kafkaProducerService.publishAppointmentEvent(KafkaProducerService.TOPIC_APPOINTMENT_COMPLETED,
@@ -215,6 +242,18 @@ public class AttendanceService {
         map.put("end_time", a.getEndTime().format(HH_MM));
         map.put("status", a.getStatus().name());
         map.put("payment_method", a.getPaymentMethod() != null ? a.getPaymentMethod().name() : null);
+        return map;
+    }
+
+    /** Visita de varios servicios como una sola tarjeta ("Corte + Barba", total y horario completo). */
+    private Map<String, Object> groupMap(List<Appointment> group) {
+        Appointment first = group.get(0);
+        Appointment last = group.get(group.size() - 1);
+        Map<String, Object> map = toMap(last); // el id es el del último servicio; marcarlo marca toda la visita
+        map.put("service", group.stream().map(x -> x.getService().getName()).collect(Collectors.joining(" + ")));
+        map.put("price", group.stream().map(x -> x.getService().getPrice()).reduce(BigDecimal.ZERO, BigDecimal::add));
+        map.put("start_time", first.getStartTime().format(HH_MM));
+        map.put("group_token", first.getGroupToken());
         return map;
     }
 }

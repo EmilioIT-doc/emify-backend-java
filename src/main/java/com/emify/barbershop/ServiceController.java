@@ -4,6 +4,7 @@ import com.emify.auth.dto.ApiResponse;
 import com.emify.booking.AppointmentRepository;
 import com.emify.common.ApiException;
 import com.emify.common.CurrentUser;
+import com.emify.common.FileStorageService;
 import com.emify.user.User;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.Valid;
@@ -14,9 +15,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -37,6 +40,8 @@ public class ServiceController {
     private final ServiceRepository serviceRepository;
     private final AppointmentRepository appointmentRepository;
     private final LocationAccessService access;
+    private final ServiceImageRepository serviceImageRepository;
+    private final FileStorageService fileStorageService;
 
     // GET /api/authBarberShop/location/{locationId}/services
     @GetMapping
@@ -134,8 +139,73 @@ public class ServiceController {
             throw ApiException.unprocessable("Este servicio ya tiene citas registradas. Desactívalo en lugar de eliminarlo.");
         }
 
+        serviceImageRepository.deleteAll(serviceImageRepository.findByServiceIdOrderBySortOrderAscIdAsc(serviceId));
         serviceRepository.delete(service);
         return ResponseEntity.ok(ApiResponse.ok("Servicio eliminado", null));
+    }
+
+    // -------------------------------------------------------
+    // FOTOS DEL TRABAJO (máx. 3 por servicio). El cliente las ve al abrir el servicio en la reserva.
+    // -------------------------------------------------------
+
+    // POST /api/authBarberShop/location/{locationId}/services/{serviceId}/images  (multipart: image)
+    @PostMapping(value = "/{serviceId}/images", consumes = "multipart/form-data")
+    public ResponseEntity<ApiResponse<?>> addImage(
+            @PathVariable Long locationId,
+            @PathVariable Long serviceId,
+            @RequestParam("image") MultipartFile image,
+            Authentication authentication) {
+
+        access.requireOwner(CurrentUser.require(authentication), locationId);
+        BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
+                .orElseThrow(() -> ApiException.notFound("Servicio no encontrado"));
+
+        long count = serviceImageRepository.countByServiceId(serviceId);
+        if (count >= ServiceImage.MAX_PER_SERVICE) {
+            throw ApiException.unprocessable("Cada servicio puede tener máximo " + ServiceImage.MAX_PER_SERVICE + " fotos");
+        }
+        if (!fileStorageService.isEnabled()) {
+            throw ApiException.unprocessable("Las fotos todavía no están disponibles en este servidor");
+        }
+        String url = fileStorageService.storeImage(image, "services");
+        if (url == null) throw ApiException.unprocessable("No se pudo guardar la foto. Usa JPG, PNG o WEBP.");
+
+        serviceImageRepository.save(ServiceImage.builder()
+                .service(service)
+                .imageUrl(url)
+                .sortOrder((int) count)
+                .build());
+
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(ApiResponse.ok("Foto agregada", Map.of("service", buildServiceMap(service))));
+    }
+
+    // POST /api/authBarberShop/location/{locationId}/services/{serviceId}/images/{imageId}/delete  (o DELETE)
+    @RequestMapping(value = {"/{serviceId}/images/{imageId}/delete", "/{serviceId}/images/{imageId}"},
+            method = {RequestMethod.POST, RequestMethod.DELETE})
+    public ResponseEntity<ApiResponse<?>> deleteImage(
+            @PathVariable Long locationId,
+            @PathVariable Long serviceId,
+            @PathVariable Long imageId,
+            Authentication authentication) {
+
+        access.requireOwner(CurrentUser.require(authentication), locationId);
+        BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
+                .orElseThrow(() -> ApiException.notFound("Servicio no encontrado"));
+        ServiceImage img = serviceImageRepository.findByIdAndServiceId(imageId, serviceId)
+                .orElseThrow(() -> ApiException.notFound("Foto no encontrada"));
+        serviceImageRepository.delete(img);
+
+        // Reacomoda el orden (la primera es la portada)
+        List<ServiceImage> rest = serviceImageRepository.findByServiceIdOrderBySortOrderAscIdAsc(serviceId);
+        for (int i = 0; i < rest.size(); i++) {
+            if (rest.get(i).getSortOrder() == null || rest.get(i).getSortOrder() != i) {
+                rest.get(i).setSortOrder(i);
+                serviceImageRepository.save(rest.get(i));
+            }
+        }
+
+        return ResponseEntity.ok(ApiResponse.ok("Foto eliminada", Map.of("service", buildServiceMap(service))));
     }
 
     private Map<String, Object> buildServiceMap(BarberService s) {
@@ -147,6 +217,9 @@ public class ServiceController {
         map.put("price", s.getPrice());
         map.put("duration", s.getDuration());
         map.put("is_active", s.isActive());
+        map.put("images", serviceImageRepository.findByServiceIdOrderBySortOrderAscIdAsc(s.getId()).stream()
+                .map(img -> Map.of("id", img.getId(), "url", img.getImageUrl()))
+                .toList());
         map.put("created_at", s.getCreatedAt() != null ? s.getCreatedAt().toString() : null);
         map.put("updated_at", s.getUpdatedAt() != null ? s.getUpdatedAt().toString() : null);
         return map;

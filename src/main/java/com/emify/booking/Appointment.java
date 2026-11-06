@@ -66,6 +66,11 @@ public class Appointment {
     @Column(unique = true)
     private String token;
 
+    // Visita con varios servicios: citas encadenadas (una por servicio) con el mismo group_token (V8).
+    // NULL = cita de un solo servicio.
+    @Column(name = "group_token", length = 32)
+    private String groupToken;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

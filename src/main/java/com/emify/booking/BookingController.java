@@ -10,6 +10,10 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import org.springframework.web.multipart.MultipartFile;
+
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 @RestController
@@ -42,23 +46,57 @@ public class BookingController {
         return ResponseEntity.ok(response);
     }
 
-    // POST /api/booking/appointment
+    // POST /api/booking/appointment  (multipart/form-data o x-www-form-urlencoded)
+    // Varios servicios: service_ids=1&service_ids=2 (en el orden de la visita). service_id sigue funcionando.
+    // Productos: product_ids + product_quantities (listas paralelas).
+    // Fotos de referencia (máx. 3): reference_images + reference_service_ids (a qué servicio va cada una).
+    // reference_image (una sola foto) se sigue aceptando.
     @PostMapping(value = "/appointment", consumes = {"multipart/form-data", "application/x-www-form-urlencoded"})
     public ResponseEntity<ApiResponse<?>> createAppointment(
             @RequestParam Long location_id,
-            @RequestParam Long service_id,
+            @RequestParam(required = false) Long service_id,
+            @RequestParam(required = false) List<Long> service_ids,
             @RequestParam(required = false) Long staff_id,
             @RequestParam String start_time,
             @RequestParam String name,
             @RequestParam String phone,
             @RequestParam(required = false) String notes,
-            @RequestParam(required = false) org.springframework.web.multipart.MultipartFile reference_image) {
+            @RequestParam(required = false) List<Long> product_ids,
+            @RequestParam(required = false) List<Integer> product_quantities,
+            @RequestParam(required = false) List<MultipartFile> reference_images,
+            @RequestParam(required = false) List<Long> reference_service_ids,
+            @RequestParam(required = false) MultipartFile reference_image) {
 
-        // Sin S3: en local la imagen se guarda en disco (emify.uploads.*); en prod se ignora.
-        String referenceImageUrl = fileStorageService.storeImage(reference_image, "appointments");
+        List<Long> serviceIds = service_ids != null && !service_ids.isEmpty()
+                ? service_ids
+                : service_id != null ? List.of(service_id) : List.of();
+
+        List<BookingService.ProductLine> products = new ArrayList<>();
+        if (product_ids != null) {
+            for (int i = 0; i < product_ids.size(); i++) {
+                Integer qty = product_quantities != null && i < product_quantities.size() ? product_quantities.get(i) : 1;
+                products.add(new BookingService.ProductLine(product_ids.get(i), qty));
+            }
+        }
+
+        // Sin S3: en local las fotos se guardan en disco (emify.uploads.*); en prod se ignoran.
+        List<BookingService.ReferenceImage> refs = new ArrayList<>();
+        if (reference_images != null) {
+            for (int i = 0; i < reference_images.size() && refs.size() < AppointmentImage.MAX_PER_VISIT; i++) {
+                String url = fileStorageService.storeImage(reference_images.get(i), "appointments");
+                if (url == null) continue;
+                Long serviceId = reference_service_ids != null && i < reference_service_ids.size() ? reference_service_ids.get(i) : null;
+                refs.add(new BookingService.ReferenceImage(serviceId, url));
+            }
+        }
+        if (reference_image != null && refs.size() < AppointmentImage.MAX_PER_VISIT) {
+            String url = fileStorageService.storeImage(reference_image, "appointments");
+            if (url != null) refs.add(new BookingService.ReferenceImage(null, url));
+        }
+
         ApiResponse<?> response = bookingService.createAppointment(
-                location_id, service_id, staff_id,
-                start_time, name, phone, notes, referenceImageUrl);
+                location_id, serviceIds, staff_id,
+                start_time, name, phone, notes, refs, products);
 
         if (!response.isStatus()) {
             return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY).body(response);

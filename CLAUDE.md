@@ -91,7 +91,11 @@ Otras propiedades relevantes de `application.yml`:
   - `ALTER TYPE ... ADD VALUE` en PostgreSQL dentro de una transacción requiere PostgreSQL 12 o mayor.
 - Versiones actuales: V1 esquema base (barbería y usuarios), V2–V4 restaurante, V5 estado `no_show`,
   V6 `appointments.payment_method`, V7 hora de comida (`availability.break_start/break_end`) y tiempo entre
-  citas por sucursal (`barbershop_locations.buffer_minutes`, default 10).
+  citas por sucursal (`barbershop_locations.buffer_minutes`, default 10), V8 reserva con varios servicios
+  (`appointments.group_token`), fotos por servicio (`service_images`), fotos de referencia del cliente
+  (`appointment_images`) y productos apartados (`appointment_products`).
+- ⚠️ Desde V8 `appointment_images` y `appointment_products` tienen FK hacia `appointments`: si alguna vez se
+  reconstruye esa tabla en SQLite (como en V5), tenlas en cuenta.
 - En PostgreSQL los enums son nativos (`user_role`, `staff_role`, `appointment_status`, `service_type_enum`,
   `barbershop_image_type`). Las entidades los mapean con
   `@Enumerated(EnumType.STRING) @JdbcTypeCode(SqlTypes.NAMED_ENUM)`. **Usa ese mismo patrón** para enums
@@ -167,7 +171,10 @@ Otras propiedades relevantes de `application.yml`:
 | `barbershop_staff` | `BarbershopStaff` | (usuario, sucursal), `staff_role` (siempre `barber`), `is_active` (baja lógica) |
 | `staff_services` | — | Relación personal ↔ servicios (sin uso real todavía) |
 | `availability` | `Availability` | Horario semanal: `day_of_week` 0=domingo…6, `start_time`, `end_time`, `break_start`/`break_end` (V7, comida; NULL = sin comida); `staff_id NULL` = horario de la sucursal. Una fila por día |
-| `appointments` | `Appointment` | `location_id`, `service_id`, `staff_id` (nullable), `client_id`, `start_time`, `end_time`, `status`, `payment_method` (V6), `token` (único, público), `reference_image` |
+| `appointments` | `Appointment` | `location_id`, `service_id`, `staff_id` (nullable), `client_id`, `start_time`, `end_time`, `status`, `payment_method` (V6), `token` (único, público), `reference_image_url` (primera foto de referencia), `group_token` (V8: misma visita con varios servicios) |
+| `service_images` | `ServiceImage` | V8. Fotos del trabajo de un servicio, **máx. 3** (`sort_order`; la primera es la portada). Las sube el dueño en Catálogo |
+| `appointment_images` | `AppointmentImage` | V8. Fotos de referencia del cliente (**máx. 3 por visita**), en la cita del servicio al que corresponden |
+| `appointment_products` | `AppointmentProduct` | V8. Productos apartados en la visita (copia de nombre y precio, `quantity`). Van en la primera cita del grupo. **No cuentan como venta** (pendiente de decidir) |
 | `restaurants`, `restaurant_locations`, `menu_categories`, `menu_items`, `restaurant_availability`, `restaurant_orders`, `restaurant_order_items` | `restaurant/*` | Rubro restaurante (V2–V4) |
 
 Enums nativos de PostgreSQL: `user_role`, `staff_role` (`barber`/`admin`/`manager`), `appointment_status`
@@ -201,6 +208,7 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
 | POST | `/authBarberShop/location/{id}/schedule` | Dueño |
 | GET/POST | `/authBarberShop/location/{id}/services` | GET dueño o personal / POST dueño |
 | POST | `/authBarberShop/location/{id}/services/{sid}` · `/{sid}/delete` (también `DELETE /{sid}`) | Dueño |
+| POST | `/authBarberShop/location/{id}/services/{sid}/images` (multipart `image`) · `/images/{imgId}/delete` | Dueño. Máx. 3 fotos; el GET de servicios trae `images: [{id, url}]` |
 | GET/POST | `/authBarberShop/location/{id}/products` · `/{pid}` · `/{pid}/delete` | Dueño (multipart para imagen) |
 | GET | `/authBarberShop/location/{id}/calendar?date=YYYY-MM-DD` | Dueño o personal |
 | GET | `/authBarberShop/location/{id}/recent-sales` | Dueño. Sin params: últimos 7 días. Con `?period=&date=YYYY-MM-DD`: `day` = horas del horario de ese día · `week` = lun–dom (`closed` en días que no abre) · `month` = ene–dic del año · `year` = últimos 10 años. `total` = suma de la gráfica; `previous_total` = rango anterior hasta el mismo punto; `future`, `is_current`, `by_payment` |
@@ -210,9 +218,9 @@ Todos bajo `/api`. 🔓 = público. El resto requiere JWT. "dueño" = `LocationA
 **`booking`** (`BookingController`, 🔓)
 | Método | Ruta | Qué hace |
 |---|---|---|
-| GET | `/booking/location/{id}` | Datos públicos: servicios activos, personal activo, horario |
-| GET | `/booking/location/{id}/slots?date=&duration=&staff_id=` | Horarios libres |
-| POST | `/booking/appointment` | `multipart/form-data` o `x-www-form-urlencoded`. Crea cita (+ usuario guest) |
+| GET | `/booking/location/{id}` | Datos públicos: servicios activos (con `images` y `is_top`), personal activo (con `is_top` = más citas atendidas), `products` activos y horario |
+| GET | `/booking/location/{id}/slots?date=&duration=&staff_id=` | Horarios libres. Sin `staff_id` y con personal = unión de los horarios de cada barbero ("Cualquiera") |
+| POST | `/booking/appointment` | `multipart/form-data` o `x-www-form-urlencoded`. Crea la visita (+ usuario guest). `service_ids` (varios, en orden; `service_id` sigue funcionando), `staff_id` opcional, `product_ids` + `product_quantities`, `reference_images` + `reference_service_ids` (máx. 3), `notes` |
 | GET | `/booking/my-appointments` | Valida sesión en el controlador |
 | GET | `/booking/appointment/{token}` | Ver cita |
 | POST | `/booking/appointment/{token}/cancel` · `/reschedule` | Solo citas futuras no cerradas |
@@ -325,9 +333,18 @@ Frases que rotan en "Mi agenda" del barbero cuando tiene el día libre (lista fi
     - sin barbero: contra cualquier cita de la sucursal.
   - El cliente se identifica por teléfono: si no existe, se crea un usuario "guest"
     (`{telefono}@guest.emify.com`, sin password usable).
-- Si la sucursal tiene personal, el frontend obliga a elegir barbero.
+- **Varios servicios en una visita (V8):** se crea una cita por servicio, encadenadas **sin** tiempo entre citas
+  (es la misma visita) y con el mismo `group_token`. Así ventas, top servicios y top personal cuentan cada servicio
+  sin cambiar las métricas. Ver por token, cancelar y reagendar actúan sobre **toda la visita**; "Mis citas" la
+  muestra una vez ("Corte + Barba"). Asistencia: el pop-up sale una sola vez y cuando termina el último servicio;
+  marcar uno marca los demás que ya empezaron. El calendario sigue mostrando un bloque por servicio, cada uno con
+  `group_services`, `reference_images` y `products` de toda la visita.
+- **"Cualquiera":** sin `staff_id` y con personal, los horarios son la unión de los de cada barbero y al crear la
+  cita se asigna al barbero libre con menos citas ese día (`staff_auto_assigned: true` en la respuesta).
+- La estrella del barbero en la reserva es `is_top` (más citas `completed` en la sucursal).
 - Cancelar o reagendar: por `token`, solo citas futuras, no canceladas y no cerradas.
-- Fotos de referencia opcionales (multipart `reference_image`): se guardan en disco si `emify.uploads.enabled` está activo.
+- Fotos de referencia opcionales (multipart `reference_images`, máx. 3 por visita, o `reference_image`): se guardan
+  en disco si `emify.uploads.enabled` está activo (en prod se ignoran hasta tener S3). Las fotos de servicio igual.
 
 ### Estados de cita y asistencia (ventas)
 `pending` → (`confirmed`) → `completed` (**sí llegó**) | `no_show` (no llegó) | `cancelled`.

@@ -38,6 +38,38 @@ public interface AppointmentRepository extends JpaRepository<Appointment, Long> 
 
     Optional<Appointment> findByToken(String token);
 
+    /** Citas de una misma visita (varios servicios encadenados), en orden. */
+    List<Appointment> findByGroupTokenOrderByStartTimeAsc(String groupToken);
+
+    // Reagendar una visita de varios servicios: el empalme ignora las citas del mismo grupo
+    @Query("""
+        SELECT COUNT(a) > 0 FROM Appointment a
+        WHERE a.staff.user.id = :userId
+        AND (a.groupToken IS NULL OR a.groupToken <> :groupToken)
+        AND a.status IN :statuses
+        AND a.startTime < :endTime
+        AND a.endTime > :startTime
+    """)
+    boolean existsOverlapForStaffUserExcludingGroup(@Param("userId") Long userId,
+                                                    @Param("startTime") LocalDateTime startTime,
+                                                    @Param("endTime") LocalDateTime endTime,
+                                                    @Param("statuses") Collection<AppointmentStatus> statuses,
+                                                    @Param("groupToken") String groupToken);
+
+    @Query("""
+        SELECT COUNT(a) > 0 FROM Appointment a
+        WHERE a.location.id = :locationId
+        AND (a.groupToken IS NULL OR a.groupToken <> :groupToken)
+        AND a.status IN :statuses
+        AND a.startTime < :endTime
+        AND a.endTime > :startTime
+    """)
+    boolean existsOverlapForLocationExcludingGroup(@Param("locationId") Long locationId,
+                                                   @Param("startTime") LocalDateTime startTime,
+                                                   @Param("endTime") LocalDateTime endTime,
+                                                   @Param("statuses") Collection<AppointmentStatus> statuses,
+                                                   @Param("groupToken") String groupToken);
+
     // Verificar overlap de staff
     @Query("""
         SELECT COUNT(a) > 0 FROM Appointment a
