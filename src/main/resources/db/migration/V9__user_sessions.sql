@@ -1,5 +1,5 @@
 -- =============================================================
--- V8: sesiones del lado del servidor (reemplazan al JWT) y registro de actividad.
+-- V9: sesiones del lado del servidor (reemplazan al JWT) y registro de actividad.
 --
 -- user_sessions: una fila por dispositivo con sesión. La cookie HttpOnly lleva un token aleatorio;
 --   aquí solo se guarda su SHA-256 (token_hash). Revocar = llenar revoked_at: la siguiente petición
