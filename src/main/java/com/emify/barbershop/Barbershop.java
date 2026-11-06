@@ -50,6 +50,15 @@ public class Barbershop {
     @Column(name = "last_payment_id")
     private String lastPaymentId;
 
+    // Estilo de la página pública de reservas (V10). Ver BookingTheme.
+    @Column(name = "booking_theme", nullable = false, length = 20)
+    @Builder.Default
+    private String bookingTheme = BookingTheme.DEFAULT;
+
+    // Color principal dentro del estilo; null = el del estilo
+    @Column(name = "booking_accent", length = 7)
+    private String bookingAccent;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 

@@ -85,7 +85,9 @@ public class BarbershopController {
                 user, id,
                 body.get("name"),
                 body.get("description"),
-                body.get("website")
+                body.get("website"),
+                body.get("booking_theme"),
+                body.get("booking_accent")
         );
         return ResponseEntity.ok(response);
     }

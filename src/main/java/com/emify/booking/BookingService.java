@@ -171,10 +171,13 @@ public class BookingService {
         locationMap.put("staff", staffList);
         locationMap.put("products", productList);
         if (location.getBarbershop() != null) {
-            locationMap.put("barbershop", Map.of(
-                    "id", location.getBarbershop().getId(),
-                    "name", location.getBarbershop().getName()
-            ));
+            // Incluye el estilo de la página de reservas que eligió el dueño (V10)
+            Map<String, Object> shop = new LinkedHashMap<>();
+            shop.put("id", location.getBarbershop().getId());
+            shop.put("name", location.getBarbershop().getName());
+            shop.put("booking_theme", BookingTheme.themeOf(location.getBarbershop().getBookingTheme()));
+            shop.put("booking_accent", location.getBarbershop().getBookingAccent());
+            locationMap.put("barbershop", shop);
         }
 
         return ApiResponse.ok("Get success", Map.of(

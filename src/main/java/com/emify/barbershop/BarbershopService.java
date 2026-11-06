@@ -185,6 +185,17 @@ public class BarbershopService {
     // -------------------------------------------------------
     @Transactional
     public ApiResponse<?> updateBarbershop(User user, Long id, String name, String description, String website) {
+        return updateBarbershop(user, id, name, description, website, null, null);
+    }
+
+    /**
+     * También guarda el estilo de la página de reservas (Ajustes): booking_theme y su color
+     * booking_accent (uno de los 4 del estilo; vacío = el del estilo). Cambiar solo el estilo
+     * regresa el color al del estilo.
+     */
+    @Transactional
+    public ApiResponse<?> updateBarbershop(User user, Long id, String name, String description, String website,
+                                           String bookingTheme, String bookingAccent) {
         Barbershop barbershop = barbershopRepository.findById(id)
                 .filter(b -> b.getOwner().getId().equals(user.getId()))
                 .orElse(null);
@@ -193,6 +204,23 @@ public class BarbershopService {
             return ApiResponse.fail("Barbería no encontrada");
         }
 
+        // Se valida antes de tocar la entidad (dentro de la transacción cualquier cambio se guardaría)
+        String theme = null;
+        String accent = null;
+        boolean styleChange = bookingTheme != null || bookingAccent != null;
+        if (styleChange) {
+            theme = bookingTheme != null ? bookingTheme.trim() : BookingTheme.themeOf(barbershop.getBookingTheme());
+            if (!BookingTheme.isValid(theme)) return ApiResponse.fail("Ese estilo no existe");
+            accent = bookingAccent == null || bookingAccent.isBlank() ? null : bookingAccent.trim().toUpperCase();
+            if (!BookingTheme.isValidAccent(theme, accent)) {
+                return ApiResponse.fail("Ese color no está disponible para el estilo elegido");
+            }
+        }
+
+        if (styleChange) {
+            barbershop.setBookingTheme(theme);
+            barbershop.setBookingAccent(accent);
+        }
         if (name != null) barbershop.setName(name);
         if (description != null) barbershop.setDescription(description);
         if (website != null) barbershop.setWebsite(website);
@@ -384,6 +412,8 @@ public class BarbershopService {
         map.put("website", b.getWebsite());
         map.put("is_active", b.isActive());
         map.put("subscription_status", b.getSubscriptionStatus());
+        map.put("booking_theme", BookingTheme.themeOf(b.getBookingTheme()));
+        map.put("booking_accent", b.getBookingAccent());
         map.put("created_at", b.getCreatedAt());
         map.put("updated_at", b.getUpdatedAt());
         return map;
