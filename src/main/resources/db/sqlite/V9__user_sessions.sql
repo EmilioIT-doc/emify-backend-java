@@ -1,4 +1,4 @@
--- V8 (SQLite) — equivalente a db/migration/V8__user_sessions.sql
+-- V9 (SQLite) — equivalente a db/migration/V9__user_sessions.sql
 -- Sesiones del lado del servidor (reemplazan al JWT), registro de actividad e intentos por código.
 
 CREATE TABLE user_sessions (

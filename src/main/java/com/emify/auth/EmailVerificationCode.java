@@ -29,7 +29,7 @@ public class EmailVerificationCode {
     @Column(name = "expires_at", nullable = false)
     private LocalDateTime expiresAt;
 
-    /** Intentos fallidos con este código (V8). Al llegar a 5 se borra y hay que pedir otro. */
+    /** Intentos fallidos con este código (V9). Al llegar a 5 se borra y hay que pedir otro. */
     @Column(nullable = false)
     @Builder.Default
     private int attempts = 0;
