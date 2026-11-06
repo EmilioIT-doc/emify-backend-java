@@ -34,6 +34,9 @@ public class BookingService {
     private static final DateTimeFormatter DISPLAY_DATE_TIME = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
     /** Servicios que se pueden juntar en una misma visita. */
     private static final int MAX_SERVICES_PER_VISIT = 8;
+    /** V11: el negocio está suspendido (lo decide el super admin). Las citas se pueden ver y cancelar, no crear ni mover. */
+    public static final String BOOKINGS_PAUSED = "BOOKINGS_PAUSED";
+    public static final String BOOKINGS_PAUSED_MESSAGE = "Este negocio no está recibiendo reservas por ahora.";
 
     private final KafkaProducerService kafkaProducerService;
     private final AppointmentRepository appointmentRepository;
@@ -54,9 +57,10 @@ public class BookingService {
     public ApiResponse<?> getLocationInfo(Long locationId) {
         BarbershopLocation location = findActiveLocation(locationId);
         if (location == null) return ApiResponse.fail("Sucursal no encontrada");
+        // V11: negocio suspendido → la página se ve, pero sin reservas (bookings_paused en la respuesta)
 
         List<BarberService> services = serviceRepository.findByLocationIdAndIsActiveTrue(locationId);
-        List<BarbershopStaff> staff = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId);
+        List<BarbershopStaff> staff = staffRepository.findByLocationIdAndIsActiveTrueAndBookableTrueOrderByIdAsc(locationId);
         List<Availability> availability = availabilityRepository
                 .findByLocationIdAndStaffIdIsNullAndIsActiveTrue(locationId);
 
@@ -180,9 +184,12 @@ public class BookingService {
             locationMap.put("barbershop", shop);
         }
 
+        boolean paused = location.getBarbershop().isSuspended();
         return ApiResponse.ok("Get success", Map.of(
                 "location", locationMap,
-                "availability", availabilityList
+                "availability", availabilityList,
+                "bookings_paused", paused,
+                "bookings_paused_message", paused ? BOOKINGS_PAUSED_MESSAGE : ""
         ));
     }
 
@@ -190,13 +197,20 @@ public class BookingService {
     // GET AVAILABLE SLOTS
     // -------------------------------------------------------
     public ApiResponse<?> getAvailableSlots(Long locationId, String date, Long staffId, int duration) {
+        BarbershopLocation target = findActiveLocation(locationId);
+        if (target != null && target.getBarbershop().isSuspended()) {
+            return ApiResponse.fail(BOOKINGS_PAUSED, BOOKINGS_PAUSED_MESSAGE);
+        }
+        if (staffId != null && staffRepository.findById(staffId).filter(BarbershopStaff::isBookable).isEmpty()) {
+            return ApiResponse.ok("slots", Map.of("slots", List.of()));
+        }
         LocalDate localDate = clock.parseDate(date);
         if (duration <= 0) duration = 30;
 
         // Sin barbero ("Cualquiera") y con personal: la unión de los horarios libres de cada barbero
         // activo. Al crear la cita se asigna a uno que esté libre (ver pickFreeStaff).
         if (staffId == null) {
-            List<BarbershopStaff> team = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId);
+            List<BarbershopStaff> team = staffRepository.findByLocationIdAndIsActiveTrueAndBookableTrueOrderByIdAsc(locationId);
             if (!team.isEmpty()) {
                 TreeSet<String> union = new TreeSet<>(); // "HH:mm" ordena igual que la hora
                 for (BarbershopStaff member : team) {
@@ -319,6 +333,7 @@ public class BookingService {
 
         BarbershopLocation location = findActiveLocation(locationId);
         if (location == null) return ApiResponse.fail("Sucursal no encontrada");
+        if (location.getBarbershop().isSuspended()) return ApiResponse.fail(BOOKINGS_PAUSED, BOOKINGS_PAUSED_MESSAGE);
 
         // Servicios sin repetir, en el orden en que los eligió el cliente
         List<Long> ids = serviceIds == null ? List.of()
@@ -378,6 +393,7 @@ public class BookingService {
         if (staffId != null) {
             staff = staffRepository.findById(staffId)
                     .filter(BarbershopStaff::isActive)
+                    .filter(BarbershopStaff::isBookable)
                     .filter(s -> s.getLocation().getId().equals(locationId))
                     .orElse(null);
             if (staff == null) return ApiResponse.fail("Barbero no encontrado en esta sucursal");
@@ -386,7 +402,7 @@ public class BookingService {
                 return ApiResponse.fail("El barbero ya tiene una cita en ese horario");
             }
         } else {
-            List<BarbershopStaff> team = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId);
+            List<BarbershopStaff> team = staffRepository.findByLocationIdAndIsActiveTrueAndBookableTrueOrderByIdAsc(locationId);
             if (!team.isEmpty()) {
                 staff = pickFreeStaff(team, startTime.toLocalDate(), checkStart, checkEnd);
                 if (staff == null) return ApiResponse.fail("Ese horario ya no está disponible, elige otro");
@@ -624,6 +640,10 @@ public class BookingService {
 
         if (first.getStartTime().isBefore(clock.now())) {
             return ApiResponse.fail("No puedes modificar una cita pasada");
+        }
+        // Negocio suspendido: se puede cancelar, pero no mover a otro horario
+        if (first.getLocation().getBarbershop().isSuspended()) {
+            return ApiResponse.fail(BOOKINGS_PAUSED, BOOKINGS_PAUSED_MESSAGE);
         }
 
         LocalDateTime newStart = clock.parseClientDateTime(newStartTimeStr);

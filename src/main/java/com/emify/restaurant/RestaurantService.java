@@ -1,5 +1,6 @@
 package com.emify.restaurant;
 
+import com.emify.user.AccountCapabilities;
 import com.emify.auth.dto.ApiResponse;
 import com.emify.user.User;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +24,7 @@ public class RestaurantService {
     private final RestaurantAvailabilityRepository availabilityRepository;
     private final RestaurantOrderRepository orderRepository;
     private final RestaurantOrderItemRepository orderItemRepository;
+    private final AccountCapabilities capabilities;
 
     private static final String[] DAY_NAMES = {"Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"};
 
@@ -32,6 +34,8 @@ public class RestaurantService {
     @Transactional
     public ApiResponse<?> createRestaurant(User user, String businessName, String description, String website,
                                             String cuisineType, Map<String, Object> orderModes, Long restaurantId) {
+        // El personal (barbero / recepción de otro dueño) no agrega negocios; el dueño y quien agenda sí
+        capabilities.requireCanCreateBusiness(user);
 
         // Un dueño puede tener varios restaurantes (marcas distintas). Se reutiliza uno existente cuando:
         // - el wizard manda restaurant_id (regresó al paso 1 y lo volvió a enviar), o
@@ -43,6 +47,7 @@ public class RestaurantService {
                     .filter(r -> r.getOwner().getId().equals(user.getId()))
                     .orElse(null);
             if (restaurant == null) return ApiResponse.fail("Restaurante no encontrado");
+            ensureWritable(restaurant);
         } else {
             restaurant = restaurantRepository.findByOwnerIdOrderByIdAsc(user.getId()).stream()
                     .filter(r -> !locationRepository.existsByRestaurantIdAndDeletedAtIsNull(r.getId()))
@@ -74,6 +79,7 @@ public class RestaurantService {
         if (restaurant == null) {
             return ApiResponse.fail(restaurantId != null ? "Restaurante no encontrado" : "No tienes un restaurante registrado");
         }
+        ensureWritable(restaurant);
 
         List<Map<String, Object>> result = new ArrayList<>();
 
@@ -138,6 +144,7 @@ public class RestaurantService {
         if (restaurant == null) {
             return ApiResponse.fail("Restaurante no encontrado");
         }
+        ensureWritable(restaurant);
 
         if (name != null) restaurant.setName(name);
         if (description != null) restaurant.setDescription(description);
@@ -163,6 +170,7 @@ public class RestaurantService {
         if (location == null) {
             return ApiResponse.fail("Sucursal no encontrada");
         }
+        ensureWritable(location.getRestaurant());
 
         availabilityRepository.deleteByLocationId(locationId);
 
@@ -191,6 +199,7 @@ public class RestaurantService {
         if (location == null) {
             return ApiResponse.fail("Sucursal no encontrada");
         }
+        ensureWritable(location.getRestaurant());
         if (name == null || name.isBlank()) {
             return ApiResponse.fail("El nombre de la categoría es requerido");
         }
@@ -235,6 +244,7 @@ public class RestaurantService {
         if (location == null) {
             return ApiResponse.fail("Sucursal no encontrada");
         }
+        ensureWritable(location.getRestaurant());
         if (name == null || name.isBlank() || price == null) {
             return ApiResponse.fail("Nombre y precio son requeridos");
         }
@@ -264,6 +274,7 @@ public class RestaurantService {
         if (item == null) {
             return ApiResponse.fail("Platillo no encontrado");
         }
+        ensureWritable(item.getCategory().getLocation().getRestaurant());
 
         if (categoryName != null && !categoryName.isBlank() && !categoryName.equals(item.getCategory().getName())) {
             item.setCategory(findOrCreateCategory(item.getCategory().getLocation(), categoryName));
@@ -287,6 +298,7 @@ public class RestaurantService {
         if (item == null) {
             return ApiResponse.fail("Platillo no encontrado");
         }
+        ensureWritable(item.getCategory().getLocation().getRestaurant());
 
         item.setActive(false);
         menuItemRepository.save(item);
@@ -545,5 +557,13 @@ public class RestaurantService {
         map.put("image_url", i.getImageUrl());
         map.put("is_active", i.isActive());
         return map;
+    }
+
+    /** V11: restaurante suspendido por el super admin → panel en solo lectura (423, igual que en barberías). */
+    private static void ensureWritable(Restaurant restaurant) {
+        if (restaurant.isSuspended()) {
+            throw new com.emify.common.ApiException(org.springframework.http.HttpStatus.LOCKED, "BUSINESS_SUSPENDED",
+                    "Este negocio está suspendido: el panel está en solo lectura. Escríbenos para reactivarlo.");
+        }
     }
 }

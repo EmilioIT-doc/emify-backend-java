@@ -26,6 +26,7 @@ public record SessionFailure(String code, String reason, String message) {
             case "LOGOUT", "REPLACED" -> new SessionFailure(REVOKED, r, "Cerraste esta sesión. Inicia sesión de nuevo.");
             case "LIMIT" -> new SessionFailure(REVOKED, r, "Cerramos esta sesión porque tu cuenta está abierta en muchos dispositivos.");
             case "USER_DISABLED" -> new SessionFailure(REVOKED, r, "Tu cuenta está desactivada.");
+            case "USER_SUSPENDED" -> new SessionFailure(REVOKED, r, "Tu cuenta fue suspendida. Escríbenos a soporte para revisarlo.");
             default -> new SessionFailure(REVOKED, r, "Se cerró tu sesión desde otro dispositivo. Inicia sesión de nuevo.");
         };
     }

@@ -20,6 +20,15 @@ public interface UserSessionRepository extends JpaRepository<UserSession, Long> 
 
     Optional<UserSession> findByIdAndUserId(Long id, Long userId);
 
+    /** V11: hasta cuándo vale la reautenticación del super admin (UPDATE directo: no pisa token ni actividad). */
+    @Modifying
+    @Transactional
+    @Query("update UserSession s set s.elevatedUntil = :until where s.id = :id and s.revokedAt is null")
+    int elevate(@Param("id") Long id, @Param("until") LocalDateTime until);
+
+    @Query("select s.elevatedUntil from UserSession s where s.id = :id")
+    Optional<LocalDateTime> findElevatedUntil(@Param("id") Long id);
+
     /** Última actividad (solo cada touchInterval, para no escribir en cada petición). */
     @Modifying
     @Transactional

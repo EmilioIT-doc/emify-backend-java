@@ -53,8 +53,9 @@ public class TeamService {
 
     // GET /api/team/location/{id}
     public ApiResponse<?> getTeam(User user, Long locationId) {
-        BarbershopLocation location = access.requireOwnerOrStaff(user, locationId);
-        boolean isOwner = access.isOwner(user, location);
+        LocationAccessService.LocationAccess acc = access.resolve(user, locationId);
+        BarbershopLocation location = acc.location();
+        boolean isOwner = acc.isOwner();
 
         List<Map<String, Object>> staff = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId).stream()
                 .map(s -> toMap(s, location))
@@ -64,13 +65,15 @@ public class TeamService {
         data.put("staff", staff);
         // El código de invitación solo lo ve el dueño
         data.put("invite_code", isOwner ? location.getInviteCode() : null);
+        data.put("is_owner", isOwner);
+        data.put("access_level", acc.level().name().toLowerCase());
         return ApiResponse.ok("Equipo", data);
     }
 
     // POST /api/team/location/{id}/staff — el dueño crea la cuenta del barbero ("temporal")
     @Transactional
     public ApiResponse<?> createTempStaff(User owner, Long locationId, Map<String, String> body) {
-        BarbershopLocation location = access.requireOwner(owner, locationId);
+        BarbershopLocation location = access.requireOwnerForWrite(owner, locationId);
 
         String name = trim(body.get("name"));
         String email = trim(body.get("email"));
@@ -117,7 +120,7 @@ public class TeamService {
     @Transactional
     // move=true: si ya atiende en otra sucursal, sale de ella y se queda en esta
     public ApiResponse<?> addOwnerAsStaff(User owner, Long locationId, boolean move) {
-        BarbershopLocation location = access.requireOwner(owner, locationId);
+        BarbershopLocation location = access.requireOwnerForWrite(owner, locationId);
 
         List<BarbershopStaff> others = staffRepository.findActiveOwnerMemberships(owner.getId()).stream()
                 .filter(s -> !s.getLocation().getId().equals(locationId))
@@ -158,7 +161,7 @@ public class TeamService {
     @Transactional
     public ApiResponse<?> setOwnerPrimaryLocation(User owner, Long locationId) {
         if (locationId == null) throw ApiException.unprocessable("Elige una sucursal");
-        BarbershopLocation location = access.requireOwner(owner, locationId);
+        BarbershopLocation location = access.requireOwnerForWrite(owner, locationId);
 
         List<String> released = new ArrayList<>();
         for (BarbershopStaff s : staffRepository.findActiveOwnerMemberships(owner.getId())) {
@@ -206,6 +209,7 @@ public class TeamService {
         BarbershopLocation location = locationRepository.findByInviteCodeAndDeletedAtIsNull(code.toUpperCase(Locale.ROOT))
                 .orElseThrow(() -> ApiException.unprocessable("Código inválido o expirado"));
 
+        access.ensureWritable(location.getBarbershop());
         BarbershopStaff staff = staffRepository.findByUserIdAndLocationId(user.getId(), location.getId()).orElse(null);
         if (staff != null && staff.isActive()) {
             throw ApiException.unprocessable("Ya eres parte del equipo de esta sucursal");
@@ -342,11 +346,74 @@ public class TeamService {
     public ApiResponse<?> removeStaff(User owner, Long staffId) {
         BarbershopStaff staff = staffRepository.findById(staffId)
                 .orElseThrow(() -> ApiException.notFound("Personal no encontrado"));
-        access.requireOwner(owner, staff.getLocation().getId());
+        access.requireOwnerForWrite(owner, staff.getLocation().getId());
 
         staff.setActive(false);
+        staff.setReceptionist(false); // si vuelve a unirse, entra como barbero
         staffRepository.save(staff);
         return ApiResponse.ok("Personal eliminado del equipo", null);
+    }
+
+    // POST /api/team/staff/{id}/receptionist   body: {value: true|false}
+    // Solo el dueño. Una recepcionista por sucursal: elegir a otra le quita el cargo a la anterior.
+    // El dueño no puede ser su propio recepcionista (ya tiene todos los permisos).
+    @Transactional
+    public ApiResponse<?> setReceptionist(User owner, Long staffId, Boolean value) {
+        if (value == null) throw ApiException.unprocessable("Indica si es recepcionista (value: true o false)");
+        BarbershopStaff staff = activeStaffOfOwner(owner, staffId);
+        BarbershopLocation location = staff.getLocation();
+        if (value && access.isOwner(staff.getUser(), location)) {
+            throw ApiException.unprocessable("Tú ya tienes todos los permisos: elige a alguien de tu equipo");
+        }
+
+        String replaced = null;
+        if (value) {
+            for (BarbershopStaff other : staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(location.getId())) {
+                if (!other.getId().equals(staff.getId()) && other.isReceptionist()) {
+                    other.setReceptionist(false);
+                    staffRepository.save(other);
+                    replaced = other.getUser().getName();
+                }
+            }
+        }
+        staff.setReceptionist(value);
+        staffRepository.save(staff);
+        log.info("🛎️ Recepción de la sucursal {}: {} → {} (por {})", location.getId(), staff.getUser().getEmail(), value,
+                owner.getEmail());
+
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("staff", toMap(staff, location));
+        data.put("replaced", replaced);
+        String message = value
+                ? staff.getUser().getName() + " es ahora recepcionista de " + location.getName()
+                : staff.getUser().getName() + " ya no es recepcionista";
+        return ApiResponse.ok(message, data);
+    }
+
+    // POST /api/team/staff/{id}/bookable   body: {value: true|false}
+    // Solo el dueño. false = no sale en la página de reservas ni tiene columna en el calendario
+    // (p. ej. una recepcionista que no corta pelo). Sus citas ya agendadas se quedan con él/ella.
+    @Transactional
+    public ApiResponse<?> setBookable(User owner, Long staffId, Boolean value) {
+        if (value == null) throw ApiException.unprocessable("Indica si recibe citas (value: true o false)");
+        BarbershopStaff staff = activeStaffOfOwner(owner, staffId);
+        staff.setBookable(value);
+        staffRepository.save(staff);
+
+        long upcoming = value ? 0 : appointmentRepository.countUpcomingForStaff(
+                staff.getId(), clock.now(), AppointmentRepository.ACTIVE_STATUSES);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("staff", toMap(staff, staff.getLocation()));
+        data.put("upcoming_appointments", upcoming);
+        return ApiResponse.ok(value ? "Ya se le pueden agendar citas" : "Ya no sale en la página de reservas", data);
+    }
+
+    private BarbershopStaff activeStaffOfOwner(User owner, Long staffId) {
+        BarbershopStaff staff = staffRepository.findById(staffId)
+                .filter(BarbershopStaff::isActive)
+                .orElseThrow(() -> ApiException.notFound("Personal no encontrado"));
+        access.requireOwnerForWrite(owner, staff.getLocation().getId());
+        return staff;
     }
 
     private Map<String, Object> toMap(BarbershopStaff s, BarbershopLocation location) {
@@ -371,6 +438,8 @@ public class TeamService {
         map.put("id", s.getId());
         map.put("role", role);
         map.put("is_active", s.isActive());
+        map.put("is_receptionist", s.isReceptionist());
+        map.put("bookable", s.isBookable());
         map.put("user", user);
         return map;
     }

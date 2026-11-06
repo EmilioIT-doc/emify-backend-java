@@ -4,6 +4,7 @@ import com.emify.auth.dto.ApiResponse;
 import com.emify.barbershop.BarberService;
 import com.emify.barbershop.BarbershopStaff;
 import com.emify.barbershop.BarbershopStaffRepository;
+import com.emify.barbershop.LocationAccessService;
 import com.emify.barbershop.ServiceRepository;
 import com.emify.booking.Appointment.AppointmentStatus;
 import com.emify.booking.Appointment.PaymentMethod;
@@ -55,6 +56,7 @@ public class AttendanceService {
     private final BarbershopStaffRepository staffRepository;
     private final ServiceRepository serviceRepository;
     private final UserRepository userRepository;
+    private final LocationAccessService access;
 
     // GET /api/attendance/pending
     // Una visita con varios servicios (mismo group_token) sale una sola vez y hasta que termina el último.
@@ -63,6 +65,7 @@ public class AttendanceService {
         Set<String> seenGroups = new HashSet<>();
         List<Map<String, Object>> pending = new ArrayList<>();
         for (Appointment a : appointmentRepository.findPendingAttendance(user.getId(), now, ACTIVE_STATUSES)) {
+            if (a.getLocation().getBarbershop().isSuspended()) continue; // panel en solo lectura: no se pide
             if (a.getGroupToken() == null) {
                 pending.add(toMap(a));
                 continue;
@@ -92,6 +95,7 @@ public class AttendanceService {
                 .filter(a -> canMark(user, a))
                 .orElseThrow(() -> ApiException.notFound("Cita no encontrada"));
 
+        access.ensureWritable(appointment.getLocation().getBarbershop());
         if (appointment.getStatus() == AppointmentStatus.cancelled) {
             throw ApiException.unprocessable("La cita fue cancelada");
         }
@@ -147,6 +151,12 @@ public class AttendanceService {
     @Transactional
     public ApiResponse<?> registerWalkIn(User user, Long locationId, Long serviceId, String startTimeValue,
                                          String paymentMethodValue, String clientName) {
+        return registerWalkIn(user, locationId, serviceId, startTimeValue, paymentMethodValue, clientName, null);
+    }
+
+    @Transactional
+    public ApiResponse<?> registerWalkIn(User user, Long locationId, Long serviceId, String startTimeValue,
+                                         String paymentMethodValue, String clientName, Long staffId) {
         if (locationId == null) throw ApiException.unprocessable("Falta la sucursal");
         if (serviceId == null) throw ApiException.unprocessable("Elige el servicio que hiciste");
 
@@ -155,9 +165,20 @@ public class AttendanceService {
             throw ApiException.unprocessable("Indica cómo pagó el cliente: efectivo, tarjeta o transferencia");
         }
 
-        BarbershopStaff staff = staffRepository.findByUserIdAndLocationId(user.getId(), locationId)
-                .filter(BarbershopStaff::isActive)
-                .orElseThrow(() -> ApiException.notFound("No atiendes en esta sucursal"));
+        BarbershopStaff staff;
+        if (staffId != null) {
+            // Dueño o recepción registran el imprevisto a nombre de un barbero de la sucursal
+            access.requireManagerForWrite(user, locationId);
+            staff = staffRepository.findById(staffId)
+                    .filter(BarbershopStaff::isActive)
+                    .filter(s -> s.getLocation().getId().equals(locationId))
+                    .orElseThrow(() -> ApiException.notFound("Ese barbero no está en esta sucursal"));
+        } else {
+            staff = staffRepository.findByUserIdAndLocationId(user.getId(), locationId)
+                    .filter(BarbershopStaff::isActive)
+                    .orElseThrow(() -> ApiException.notFound("No atiendes en esta sucursal"));
+        }
+        access.ensureWritable(staff.getLocation().getBarbershop());
 
         BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
                 .filter(BarberService::isActive)
@@ -220,11 +241,10 @@ public class AttendanceService {
         return ApiResponse.ok("Cliente imprevisto registrado", Map.of("appointment", toMap(appointment)));
     }
 
-    /** El dueño de la barbería o el barbero asignado a la cita. */
+    /** El dueño, la recepción de esa sucursal (V11) o el barbero asignado a la cita. */
     private boolean canMark(User user, Appointment a) {
-        boolean isOwner = a.getLocation().getBarbershop().getOwner().getId().equals(user.getId());
         boolean isAssignedStaff = a.getStaff() != null && a.getStaff().getUser().getId().equals(user.getId());
-        return isOwner || isAssignedStaff;
+        return isAssignedStaff || access.canManage(user, a.getLocation());
     }
 
     private Map<String, Object> toMap(Appointment a) {

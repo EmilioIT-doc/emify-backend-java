@@ -1,5 +1,6 @@
 package com.emify.auth;
 
+import com.emify.user.AccountCapabilities;
 import com.emify.auth.dto.*;
 import com.emify.barbershop.Barbershop;
 import com.emify.barbershop.BarbershopLocation;
@@ -64,6 +65,7 @@ public class AuthService {
     private final SessionService sessionService;
     private final AuthEventService authEvents;
     private final LoginAttemptService loginAttempts;
+    private final AccountCapabilities capabilities;
 
     @Value("${emify.dev.expose-verification-code:false}")
     private boolean exposeVerificationCode;
@@ -304,6 +306,8 @@ public class AuthService {
         target.put("businesses", buildBusinessList(user));
         target.put("staff_location", buildStaffLocationMap(user));
         target.put("workplaces", buildWorkplaces(user));
+        // Dueño o quien agenda: sí. Personal de otro dueño: no (ver AccountCapabilities)
+        target.put("can_create_business", capabilities.canCreateBusiness(user));
     }
 
     // Todos los negocios del dueño, de todos los rubros. Puede tener varios del mismo rubro
@@ -313,23 +317,25 @@ public class AuthService {
 
         for (Barbershop b : barbershopRepository.findByOwnerIdOrderByIdAsc(user.getId())) {
             list.add(businessEntry(b.getId(), b.getName(), "barbershop",
-                    barbershopLocationRepository.countByBarbershopIdAndDeletedAtIsNull(b.getId())));
+                    barbershopLocationRepository.countByBarbershopIdAndDeletedAtIsNull(b.getId()), b.getSuspendedAt()));
         }
 
         for (Restaurant r : restaurantRepository.findByOwnerIdOrderByIdAsc(user.getId())) {
             list.add(businessEntry(r.getId(), r.getName(), "restaurant",
-                    restaurantLocationRepository.countByRestaurantIdAndDeletedAtIsNull(r.getId())));
+                    restaurantLocationRepository.countByRestaurantIdAndDeletedAtIsNull(r.getId()), r.getSuspendedAt()));
         }
 
         return list;
     }
 
-    private static Map<String, Object> businessEntry(Long id, String name, String rubro, long locationsCount) {
+    private static Map<String, Object> businessEntry(Long id, String name, String rubro, long locationsCount,
+                                                     LocalDateTime suspendedAt) {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("id", id);
         map.put("name", name);
         map.put("rubro", rubro);
         map.put("locations_count", locationsCount);
+        map.put("suspended", suspendedAt != null);
         return map;
     }
 
@@ -349,6 +355,10 @@ public class AuthService {
             map.put("business_id", barbershop.getId());
             map.put("business_name", barbershop.getName());
             map.put("rubro", "barbershop");
+            // V11: qué puede hacer en esa sucursal
+            map.put("access_level", staff.isReceptionist() ? "receptionist" : "staff");
+            map.put("bookable", staff.isBookable());
+            map.put("suspended", barbershop.isSuspended());
             list.add(map);
         }
         return list;
@@ -401,7 +411,9 @@ public class AuthService {
                 "role", user.getRole().name(),
                 "is_active", user.isActive(),
                 "avatar_url", user.getAvatarUrl() != null ? user.getAvatarUrl() : "",
-                "email_verified_at", user.getEmailVerifiedAt() != null ? user.getEmailVerifiedAt().toString() : ""
+                "email_verified_at", user.getEmailVerifiedAt() != null ? user.getEmailVerifiedAt().toString() : "",
+                // V11: true solo para las cuentas de emify.admin.super-admins (muestra el menú "Administración")
+                "is_super_admin", user.isSuperAdmin()
         );
     }
-}
+}

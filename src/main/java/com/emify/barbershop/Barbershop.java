@@ -59,6 +59,24 @@ public class Barbershop {
     @Column(name = "booking_accent", length = 7)
     private String bookingAccent;
 
+    /** Plan contratado (V11). Null = sin plan asignado todavía. */
+    @Column(name = "plan_id")
+    private Long planId;
+
+    /** Suspendido por el super admin (V11): reservas pausadas y panel en solo lectura. */
+    @Column(name = "suspended_at")
+    private LocalDateTime suspendedAt;
+
+    @Column(name = "suspension_reason")
+    private String suspensionReason;
+
+    @Column(name = "suspended_by")
+    private Long suspendedBy;
+
+    public boolean isSuspended() {
+        return suspendedAt != null;
+    }
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
@@ -75,4 +93,4 @@ public class Barbershop {
     protected void onUpdate() {
         updatedAt = LocalDateTime.now();
     }
-}
+}

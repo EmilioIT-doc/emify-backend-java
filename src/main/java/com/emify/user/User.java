@@ -59,6 +59,20 @@ public class User implements UserDetails {
     @Builder.Default
     private boolean isActive = true;
 
+    /**
+     * Rol de la plataforma (V11): "SUPER_ADMIN" o null. Nunca se asigna desde la app: lo sincroniza
+     * SuperAdminBootstrap con emify.admin.super-admins.
+     */
+    @Column(name = "platform_role", length = 20)
+    private String platformRole;
+
+    /** Suspendida por el super admin (V11). Lo que impide entrar es is_active = false; esto guarda cuándo y por qué. */
+    @Column(name = "suspended_at")
+    private LocalDateTime suspendedAt;
+
+    @Column(name = "suspension_reason")
+    private String suspensionReason;
+
     @Column(name = "remember_token")
     private String rememberToken;
 
@@ -83,7 +97,17 @@ public class User implements UserDetails {
 
     @Override
     public Collection<? extends GrantedAuthority> getAuthorities() {
+        if (isSuperAdmin()) {
+            return List.of(new SimpleGrantedAuthority("ROLE_" + role.name().toUpperCase()),
+                    new SimpleGrantedAuthority("ROLE_" + PLATFORM_SUPER_ADMIN));
+        }
         return List.of(new SimpleGrantedAuthority("ROLE_" + role.name().toUpperCase()));
+    }
+
+    public static final String PLATFORM_SUPER_ADMIN = "SUPER_ADMIN";
+
+    public boolean isSuperAdmin() {
+        return PLATFORM_SUPER_ADMIN.equals(platformRole);
     }
 
     @Override
@@ -114,4 +138,4 @@ public class User implements UserDetails {
     public enum Role {
         client, barber, owner
     }
-}
+}

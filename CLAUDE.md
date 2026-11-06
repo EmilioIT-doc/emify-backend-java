@@ -78,6 +78,8 @@ rubros entre sí. Respeta esos límites al agregar código.
 | `emify.session.touch-interval` | `5m` | Cada cuánto se guarda `last_seen_at` (no en cada petición) |
 | `emify.session.single-session` | `false` (prod: `EMIFY_SINGLE_SESSION`) | `true` = una sola sesión por cuenta: entrar cierra las demás (`NEW_LOGIN`) |
 | `emify.session.max-active` | `10` | Tope de sesiones abiertas por cuenta; la menos usada se cierra (`LIMIT`) |
+| `emify.admin.super-admins` | vacío (`EMIFY_SUPER_ADMINS`) | Correos separados por coma de las cuentas **super admin**. Única forma de dar el rol (ver §5.4). Registra la cuenta antes y reinicia |
+| `emify.admin.reauth-window` | `15m` | Cuánto vale la confirmación con contraseña del super admin para hacer cambios |
 
 Otras propiedades relevantes de `application.yml`:
 - `spring.servlet.multipart.max-file-size: 10MB` / `max-request-size: 12MB` (fotos de celular en reservas).
@@ -101,11 +103,16 @@ Otras propiedades relevantes de `application.yml`:
   citas por sucursal (`barbershop_locations.buffer_minutes`, default 10), V8 reserva con varios servicios
   (`appointments.group_token`), fotos por servicio (`service_images`), fotos de referencia del cliente
   (`appointment_images`) y productos apartados (`appointment_products`), V9 sesiones (`user_sessions`), registro
-  de actividad (`auth_events`) y `email_verification_codes.attempts`.
+  de actividad (`auth_events`) y `email_verification_codes.attempts`, V10 estilo de la página de reservas
+  (`barbershops.booking_theme/booking_accent`, de Valeria), V11 roles y super admin: `users.platform_role` y
+  suspensión de cuentas, recepcionista y `bookable` en `barbershop_staff`, plan y suspensión de negocios, `plans`,
+  `subscription_payments`, `admin_audit_log` (solo INSERT, con trigger) y `user_sessions.elevated_until`.
 - ⚠️ Desde V8 `appointment_images` y `appointment_products` tienen FK hacia `appointments`: si alguna vez se
   reconstruye esa tabla en SQLite (como en V5), tenlas en cuenta.
 - ⚠️ **Dos personas no pueden usar el mismo número de migración.** Antes de crear `V{n}`, haz `pull` y usa el
-  siguiente número libre (el 5-nov hubo dos V8: la de sesiones pasó a V9). Flyway no arranca con versiones repetidas.
+  siguiente número libre (el 5-nov hubo dos V8: la de sesiones pasó a V9; y dos V10: la de roles pasó a V11). Flyway no arranca con
+  versiones repetidas. Si ya aplicaste localmente una versión que luego cambió de número, borra `emify-local.db`
+  (o renómbralo) y deja que Flyway lo recree.
 - En PostgreSQL los enums son nativos (`user_role`, `staff_role`, `appointment_status`, `service_type_enum`,
   `barbershop_image_type`). Las entidades los mapean con
   `@Enumerated(EnumType.STRING) @JdbcTypeCode(SqlTypes.NAMED_ENUM)`. **Usa ese mismo patrón** para enums
@@ -127,13 +134,14 @@ Otras propiedades relevantes de `application.yml`:
 | Paquete | Contenido |
 |---|---|
 | `auth` | Registro con código por email, login, logout, `/auth/me`, tipo de cuenta, editar perfil (`AuthController`) y seguridad de la cuenta: sesiones, actividad, contraseña (`AccountSecurityController`). `auth/dto/ApiResponse` es el sobre de todas las respuestas |
-| `user` | `User` (implementa `UserDetails`; roles `client` / `barber` / `owner`) |
+| `user` | `User` (implementa `UserDetails`; roles `client` / `barber` / `owner`) y `AccountCapabilities` (qué puede hacer la cuenta según lo que es: p. ej. agregar negocio) |
 | `security` | `SecurityConfig`, `LoginAttemptService` (freno a fuerza bruta), `PasswordPolicy`; `session/` (sesiones: `SessionService`, `SessionAuthenticationFilter`, `UserSession`, `AuthEvent`, limpieza diaria) y `csrf/` (CSRF para SPA) |
 | `config` | CORS y `EmifySQLiteDialect` |
 | `common` | Utilidades transversales: `ApiException` + `GlobalExceptionHandler`, `BusinessClock` (zona horaria), `CurrentUser`, `FileStorageService` y `UploadsWebConfig` |
 | `barbershop` | Rubro barbería: negocio, sucursales, horarios, servicios (catálogo), productos, dashboard (calendario, métricas, clientes) y `LocationAccessService` (permisos) |
 | `booking` | Citas: página pública de reservas, cálculo de horarios, crear/ver/cancelar/reagendar por token, mis citas y **asistencia** |
-| `team` | Personal de una sucursal: listar, crear cuenta "temporal", unirse con código, dueño como barbero, baja |
+| `team` | Personal de una sucursal: listar, crear cuenta "temporal", unirse con código, dueño como barbero, baja, recepcionista y "recibe citas" |
+| `admin` | Super admin de la plataforma (`/api/admin/**`): consultas, suspensiones, planes, pagos y bitácora (ver §5.4) |
 | `kafka` | Productor de eventos de citas (`appointment.created`, `.cancelled`, `.completed`) |
 | `restaurant`, `ordering` | Rubro restaurante (dashboard y flujo público de pedidos) |
 
@@ -174,20 +182,24 @@ Otras propiedades relevantes de `application.yml`:
 
 | Tabla | Entidad | Notas |
 |---|---|---|
-| `users` | `User` | `role` enum `user_role` (`client`/`barber`/`owner`), `avatar_url` (una de 4 URLs de S3), `phone`, `email_verified_at`. Los clientes "guest" usan `{telefono}@guest.emify.com` |
+| `users` | `User` | `role` enum `user_role` (`client`/`barber`/`owner`), `avatar_url` (una de 4 URLs de S3), `phone`, `email_verified_at`. Los clientes "guest" usan `{telefono}@guest.emify.com`. V11: `platform_role` (`SUPER_ADMIN` o NULL, solo lo pone `SuperAdminBootstrap`), `suspended_at`/`suspension_reason` (suspendida por el super admin; lo que impide entrar es `is_active = false`) |
 | `email_verification_codes` | `EmailVerificationCode` | Código de 6 dígitos, expira en 10 min |
-| `barbershops` | `Barbershop` | `owner_id` (no único: varias marcas por dueño), `subscription_status`, `last_payment_id` |
+| `barbershops` | `Barbershop` | `owner_id` (no único: varias marcas por dueño), `subscription_status` (`trial`/`active`/`expired`), `subscription_starts_at`/`ends_at`, `last_payment_id` (id del último `subscription_payments`), `booking_theme`/`booking_accent` (V10), `plan_id`, `suspended_at`/`suspension_reason`/`suspended_by` (V11). `restaurants` tiene los mismos campos de plan y suspensión |
 | `barbershop_locations` | `BarbershopLocation` | Sucursal: dirección, teléfono, `is_default`, `serves_physical`/`serves_home`, `invite_code` (8), `buffer_minutes` (V7, descanso entre citas, default 10), `deleted_at` (borrado lógico) |
 | `barbershop_images` | — | enum `barbershop_image_type` (`logo`/`banner`/`gallery`); poco usada |
 | `services` | `BarberService` | Catálogo por sucursal: nombre, precio, `duration` (min), `service_type` (`service_type_enum`), `is_active` |
 | `products` | `Product` | Productos por sucursal (con imagen) |
-| `barbershop_staff` | `BarbershopStaff` | (usuario, sucursal), `staff_role` (siempre `barber`), `is_active` (baja lógica) |
+| `barbershop_staff` | `BarbershopStaff` | (usuario, sucursal), `staff_role` (siempre `barber`), `is_active` (baja lógica), `is_receptionist` (V11, una por sucursal, la elige el dueño), `bookable` (V11, false = no sale en reservas ni tiene columna en el calendario) |
 | `staff_services` | — | Relación personal ↔ servicios (sin uso real todavía) |
 | `availability` | `Availability` | Horario semanal: `day_of_week` 0=domingo…6, `start_time`, `end_time`, `break_start`/`break_end` (V7, comida; NULL = sin comida); `staff_id NULL` = horario de la sucursal. Una fila por día |
 | `appointments` | `Appointment` | `location_id`, `service_id`, `staff_id` (nullable), `client_id`, `start_time`, `end_time`, `status`, `payment_method` (V6), `token` (único, público), `reference_image_url` (primera foto de referencia), `group_token` (V8: misma visita con varios servicios) |
 | `service_images` | `ServiceImage` | V8. Fotos del trabajo de un servicio, **máx. 3** (`sort_order`; la primera es la portada). Las sube el dueño en Catálogo |
 | `appointment_images` | `AppointmentImage` | V8. Fotos de referencia del cliente (**máx. 3 por visita**), en la cita del servicio al que corresponden |
 | `appointment_products` | `AppointmentProduct` | V8. Productos apartados en la visita (copia de nombre y precio, `quantity`). Van en la primera cita del grupo. **No cuentan como venta** (pendiente de decidir) |
+| `plans` | `admin/Plan` | V11. `code` único, `name`, `price`, `billing_period` (`monthly`/`yearly`), `max_locations` (informativo), `is_active` (archivar, no se borran) |
+| `subscription_payments` | `admin/SubscriptionPayment` | V11. Pagos registrados por el super admin (Clip después): `business_type` + `business_id`, `amount`, `method` (`clip`/`transferencia`/`efectivo`/`tarjeta`/`otro`), `paid_at`, `period_start`/`period_end`, `status` `paid`/`void`. No se editan ni borran: se anulan con motivo |
+| `admin_audit_log` | `admin/AdminAuditLog` | V11. Bitácora del super admin: quién, acción, objetivo, motivo, `before_data`/`after_data` (JSON), IP, navegador, sesión. **Un trigger rechaza UPDATE y DELETE** (PostgreSQL y SQLite) |
+| `user_sessions` (V11) | `UserSession` | `elevated_until`: hasta cuándo vale la reautenticación del super admin en esa sesión |
 | `restaurants`, `restaurant_locations`, `menu_categories`, `menu_items`, `restaurant_availability`, `restaurant_orders`, `restaurant_order_items` | `restaurant/*` | Rubro restaurante (V2–V4) |
 
 Enums nativos de PostgreSQL: `user_role`, `staff_role` (`barber`/`admin`/`manager`), `appointment_status`
@@ -195,7 +207,9 @@ Enums nativos de PostgreSQL: `user_role`, `staff_role` (`barber`/`admin`/`manage
 
 ## 5.2 Inventario de endpoints
 
-Todos bajo `/api`. 🔓 = público. El resto requiere la cookie de sesión. "dueño" = `LocationAccessService.requireOwner`.
+Todos bajo `/api`. 🔓 = público. El resto requiere la cookie de sesión. Permisos por sucursal (V11, ver §5.4):
+"dueño" = `requireOwnerForWrite`, "dueño o recepción" = `requireManager(ForWrite)`, "todo el personal" = `requireOwnerOrStaff`.
+Con el negocio suspendido toda escritura responde **423 `BUSINESS_SUSPENDED`**.
 
 **`auth`** (`AuthController` y `AccountSecurityController`; 🔓 salvo los que dicen "sesión")
 | Método | Ruta | Qué hace |
@@ -212,44 +226,46 @@ Todos bajo `/api`. 🔓 = público. El resto requiere la cookie de sesión. "due
 | GET | `/auth/activity` | (sesión) Últimos 30 eventos: `{type, device, ip, detail, created_at}` |
 | POST | `/auth/password` | (sesión) `{current_password, new_password}`. 422 `WRONG_PASSWORD`; cierra las demás sesiones y renueva la actual → `{closed_sessions}` |
 | POST | `/auth/updateRole` | (sesión) `owner` o `client`: el tipo de cuenta con el que se registró (no da ni quita permisos) |
-| GET | `/auth/me` | Perfil + `businesses` + `workplaces` + `business`/`staff_location` (compatibilidad) |
+| GET | `/auth/me` | Perfil + `is_super_admin` + `can_create_business` + `businesses` (con `suspended`) + `workplaces` (con `access_level` `receptionist`/`staff`, `bookable`, `suspended`) + `business`/`staff_location` (compatibilidad) |
 | POST | `/auth/updateProfile` | name, phone, avatar (validado contra `AVATARS`). El email no se edita |
 | POST | `/auth/googleAuth`, `/auth/facebookAuth` | Stub → 503 |
 
 **`authBarberShop`** (`BarbershopController`, `ServiceController`, `ProductController`, `BarbershopDashboardController`)
 | Método | Ruta | Permiso |
 |---|---|---|
-| POST | `/authBarberShop/barbershop/create` | Usuario logeado (ya no cambia `users.role`) |
+| POST | `/authBarberShop/barbershop/create` | Dueño o quien agenda; **el personal de otro negocio no** (403 `STAFF_CANNOT_CREATE_BUSINESS`, ver `user/AccountCapabilities`). Ya no cambia `users.role`. Igual en `/authRestaurant/restaurant/create` |
 | POST | `/authBarberShop/location/create` | Dueño del negocio (`barbershop_id`) |
 | GET | `/authBarberShop/barbershop/{id}` | Dueño. Incluye sucursales activas |
 | POST | `/authBarberShop/barbershop/{id}/update` | Dueño |
 | POST | `/authBarberShop/location/{id}/default` (alias `/set-default`) | Dueño |
 | POST | `/authBarberShop/location/{id}/delete` | Dueño (borrado lógico) |
 | POST | `/authBarberShop/location/{id}/schedule` | Dueño |
-| GET/POST | `/authBarberShop/location/{id}/services` | GET dueño o personal / POST dueño |
-| POST | `/authBarberShop/location/{id}/services/{sid}` · `/{sid}/delete` (también `DELETE /{sid}`) | Dueño |
-| POST | `/authBarberShop/location/{id}/services/{sid}/images` (multipart `image`) · `/images/{imgId}/delete` | Dueño. Máx. 3 fotos; el GET de servicios trae `images: [{id, url}]` |
-| GET/POST | `/authBarberShop/location/{id}/products` · `/{pid}` · `/{pid}/delete` | Dueño (multipart para imagen) |
-| GET | `/authBarberShop/location/{id}/calendar?date=YYYY-MM-DD` | Dueño o personal |
-| GET | `/authBarberShop/location/{id}/recent-sales` | Dueño. Sin params: últimos 7 días. Con `?period=&date=YYYY-MM-DD`: `day` = horas del horario de ese día · `week` = lun–dom (`closed` en días que no abre) · `month` = ene–dic del año · `year` = últimos 10 años. `total` = suma de la gráfica; `previous_total` = rango anterior hasta el mismo punto; `future`, `is_current`, `by_payment` |
-| GET | `/authBarberShop/location/{id}/upcoming-appointments` | Dueño |
-| GET | `/authBarberShop/location/{id}/top-services` · `/top-staff` · `/clients` | Dueño |
+| GET/POST | `/authBarberShop/location/{id}/services` | GET todo el personal / POST dueño o recepción |
+| POST | `/authBarberShop/location/{id}/services/{sid}` · `/{sid}/delete` (también `DELETE /{sid}`) | Dueño o recepción |
+| POST | `/authBarberShop/location/{id}/services/{sid}/images` (multipart `image`) · `/images/{imgId}/delete` | Dueño o recepción. Máx. 3 fotos; el GET de servicios trae `images: [{id, url}]` |
+| GET/POST | `/authBarberShop/location/{id}/products` · `/{pid}` · `/{pid}/delete` | GET todo el personal / POST dueño o recepción (multipart para imagen) |
+| GET | `/authBarberShop/location/{id}/calendar?date=YYYY-MM-DD` | Todo el personal. Dueño y recepción ven todo; el barbero, completas solo sus citas. Trae `can_manage`, `access_level`, `suspended`; en `staff` solo quien recibe citas |
+| GET | `/authBarberShop/location/{id}/recent-sales` | Dueño o recepción (403 `FORBIDDEN_ROLE` al barbero). Sin params: últimos 7 días. Con `?period=&date=YYYY-MM-DD`: `day` = horas del horario de ese día · `week` = lun–dom (`closed` en días que no abre) · `month` = ene–dic del año · `year` = últimos 10 años. `total` = suma de la gráfica; `previous_total` = rango anterior hasta el mismo punto; `future`, `is_current`, `by_payment` |
+| GET | `/authBarberShop/location/{id}/upcoming-appointments` · `/top-services` · `/top-staff` | Dueño o recepción |
+| GET | `/authBarberShop/location/{id}/clients` | Todo el personal (clientes de toda la sucursal) |
 
 **`booking`** (`BookingController`, 🔓)
 | Método | Ruta | Qué hace |
 |---|---|---|
-| GET | `/booking/location/{id}` | Datos públicos: servicios activos (con `images` y `is_top`), personal activo (con `is_top` = más citas atendidas), `products` activos y horario |
-| GET | `/booking/location/{id}/slots?date=&duration=&staff_id=` | Horarios libres. Sin `staff_id` y con personal = unión de los horarios de cada barbero ("Cualquiera") |
+| GET | `/booking/location/{id}` | Datos públicos: servicios activos (con `images` y `is_top`), personal activo que **recibe citas** (con `is_top` = más citas atendidas), `products` activos, horario y `bookings_paused` (negocio suspendido) |
+| GET | `/booking/location/{id}/slots?date=&duration=&staff_id=` | Horarios libres. Sin `staff_id` y con personal = unión de los horarios de cada barbero ("Cualquiera"). Suspendido → `{status:false, code: BOOKINGS_PAUSED}` (igual al crear o reagendar; cancelar sí se puede) |
 | POST | `/booking/appointment` | `multipart/form-data` o `x-www-form-urlencoded`. Crea la visita (+ usuario guest). `service_ids` (varios, en orden; `service_id` sigue funcionando), `staff_id` opcional, `product_ids` + `product_quantities`, `reference_images` + `reference_service_ids` (máx. 3), `notes` |
 | GET | `/booking/my-appointments` | Valida sesión en el controlador |
 | GET | `/booking/appointment/{token}` | Ver cita |
 | POST | `/booking/appointment/{token}/cancel` · `/reschedule` | Solo citas futuras no cerradas |
 
 **`attendance`** (`AttendanceController`): `GET /attendance/pending`, `POST /attendance/{id}` `{attended, payment_method}`,
-`POST /attendance/walk-in` `{location_id, service_id, start_time?, payment_method, client_name?}` = **cliente imprevisto**
+Marcar asistencia: el barbero de la cita, el dueño o la recepción de la sucursal.
+`POST /attendance/walk-in` `{location_id, service_id, start_time?, payment_method, client_name?, staff_id?}` = **cliente imprevisto**
 (llegó sin cita): cita `completed` del barbero que la registra (debe ser personal activo de la sucursal), hora de
 hasta 7 días atrás y no futura, cliente genérico con teléfono `0000000000` ("Cliente imprevisto"; el nombre opcional
-va en `notes`). Así se cuentan los imprevistos por barbero.
+va en `notes`). Así se cuentan los imprevistos por barbero. Con `staff_id`, dueño o recepción lo registran a nombre
+de ese barbero (el frontend todavía no lo usa).
 
 **`content`** (`ContentController`): `GET /content/barber-phrases` → `{phrases: [{kind: frase|dato, text}], rotate_seconds}`.
 Frases que rotan en "Mi agenda" del barbero cuando tiene el día libre (lista fija en el código).
@@ -265,7 +281,26 @@ Frases que rotan en "Mi agenda" del barbero cuando tiene el día libre (lista fi
 | POST | `/team/join` | Unirse con código estando logeado (ya no cambia `users.role`) |
 | GET | `/team/invite/{code}` | **Público.** Datos de la sucursal del código (nombre, negocio, dirección) |
 | POST | `/team/invite/{code}/join` | **Público.** `{name, phone, email, password}`. Correo nuevo → crea cuenta barber (sin verificar correo; reusa al guest con ese teléfono). Correo existente → se une con esa cuenta si la contraseña coincide; si no, **428**. Entra directo al equipo, **abre la sesión (cookie)** y regresa `{location}`. Contraseña nueva: mínimo 8 caracteres; 5 contraseñas incorrectas = bloqueo de 15 min |
-| POST | `/team/staff/{id}/remove` | Baja lógica |
+| POST | `/team/staff/{id}/remove` | Baja lógica (también le quita la recepción) |
+| POST | `/team/staff/{id}/receptionist` | Solo el dueño. `{value}`. Una por sucursal: elegir a otra le quita el cargo a la anterior (`replaced`). El dueño no puede ser su propio recepcionista (422) |
+| POST | `/team/staff/{id}/bookable` | Solo el dueño. `{value}`. false = no sale en reservas ni en el calendario; regresa `upcoming_appointments` (sus citas ya agendadas se quedan con él/ella) |
+
+**`admin`** (`AdminController`, solo super admin; todo queda en `admin_audit_log`)
+| Método | Ruta | Qué hace |
+|---|---|---|
+| GET | `/admin/me` | `{elevated, elevated_until}` |
+| POST | `/admin/reauth` | `{password}` → la sesión puede hacer cambios 15 min. Mismo freno de 5 intentos que el login |
+| GET | `/admin/overview` | Métricas generales: usuarios, dueños, empleados, clientes, negocios activos/suspendidos, sucursales, suscripciones por estado, cobrado del mes, citas, sesiones, altas por día (30) |
+| GET | `/admin/users?q=&kind=owner\|staff\|client\|super_admin&status=active\|suspended&guests=` · `/admin/users/{id}` | Usuarios (sin guests por default) y detalle (negocios, dónde trabaja, actividad, bitácora) |
+| GET | `/admin/owners` · `/admin/staff` · `/admin/clients` · `/admin/locations` | Propietarios con sus negocios, empleados con su papel, clientes (personas con citas), sucursales. `?q=&page=&size=` |
+| GET | `/admin/businesses?q=&rubro=&status=active\|suspended\|expired\|trial\|paid` · `/admin/businesses/{rubro}/{id}` | Negocios (barberías y restaurantes) con dueño, plan, suscripción (`effective_status`: vencida si ya pasó la fecha de fin) y detalle con sucursales, personal, pagos y bitácora |
+| GET | `/admin/subscriptions?status=` · `/admin/plans` · `/admin/payments?business_type=&business_id=&status=` | Suscripciones (por fecha de fin), planes y pagos |
+| GET | `/admin/activity?type=&user_id=` · `/admin/audit?action=&target_type=&target_id=&admin_id=` | Actividad general (`auth_events`) y la bitácora del super admin |
+| POST | `/admin/users/{id}/suspend` · `/reactivate` | `{reason}`. Suspender cierra todas sus sesiones (`USER_SUSPENDED`). No a sí mismo ni a otro super admin |
+| POST | `/admin/businesses/{rubro}/{id}/suspend` · `/reactivate` | `{reason}`. Suspendido = reservas pausadas + panel en solo lectura (423). El dueño ve el motivo |
+| POST | `/admin/businesses/{rubro}/{id}/subscription` | `{plan_id?, clear_plan?, status?, starts_at?, ends_at?, reason}` ajuste manual |
+| POST | `/admin/plans` · `/admin/plans/{id}` | Crear / editar (`is_active:false` = archivar). La clave (`code`) no cambia |
+| POST | `/admin/payments` · `/admin/payments/{id}/void` | Registrar pago (con `period_end` la suscripción queda `active` hasta ese día) / anular con motivo (no revierte la suscripción) |
 
 **`authRestaurant`** y **`ordering`**: ver `RestaurantController` y `RestaurantOrderingController` (fuera de foco).
 
@@ -308,6 +343,49 @@ clásica: más simple y revocable al instante.
   agenda; SSE exigiría conexiones abiertas por usuario detrás del proxy. Se puede sumar después sin cambiar el modelo.
 - CORS en `config/CorsConfig` con `allowedOriginPatterns`. En prod el frontend llama `/api` en su mismo dominio
   (rewrite de Vercel / Caddy), así que las cookies son de primera parte.
+
+## 5.4 Roles por sucursal y super admin (V11, nov-2026)
+
+**Papeles en una sucursal** (`LocationAccessService.resolve` → `OWNER` / `RECEPTIONIST` / `STAFF`):
+| | Dueño | Recepción | Barbero |
+|---|---|---|---|
+| Inicio (métricas, ventas) | ✓ | ✓ (su sucursal) | ✗ 403 |
+| Calendario | todo | todo, marca asistencia de cualquiera | sus citas completas; las del equipo sin datos privados |
+| Productos y catálogo | crear, editar, borrar | crear, editar, borrar | solo ver |
+| Clientes | ✓ | ✓ | ✓ (toda la sucursal, lectura) |
+| Equipo, ajustes, horario, sucursales | ✓ | ✗ | ✗ |
+- La recepción la elige **solo el dueño**, una por sucursal. Puede además atender (`bookable = true`) o solo estar en
+  recepción (`bookable = false`: no sale en reservas ni en el calendario). Solo el dueño cambia entre sucursales:
+  la recepción y el barbero solo entran a las sucursales donde están dados de alta.
+- **Agregar negocio:** solo el dueño (ya tiene alguno) o quien usa emify para agendar. Quien es personal activo
+  (barbero o recepción) en el negocio de otro dueño no puede (`AccountCapabilities.requireCanCreateBusiness`, 403
+  `STAFF_CANNOT_CREATE_BUSINESS`); si el dueño lo da de baja, ya puede. Un dueño que además trabaja con otro sí puede.
+- Usa los métodos de `LocationAccessService` y no compares dueños a mano: `requireOwner(ForWrite)`,
+  `requireManager(ForWrite)`, `requireOwnerOrStaff`, `canManage`, `ensureWritable`. Los `*ForWrite` ya revisan la
+  suspensión.
+
+**Negocio suspendido** (`suspended_at`): reservas pausadas (`bookings_paused` / `BOOKINGS_PAUSED`, se puede ver y
+cancelar una cita pero no crear ni reagendar), panel en solo lectura (423 `BUSINESS_SUSPENDED` en cualquier
+escritura del dueño, recepción o barbero, incluida la asistencia; el pop-up de asistencia no sale). Restaurantes:
+igual en `RestaurantService` y los pedidos públicos. La suscripción (`subscription_*`) es aparte: **vencer no
+suspende sola** (lo decide el super admin).
+
+**Super admin** (`users.platform_role = 'SUPER_ADMIN'`, autoridad `ROLE_SUPER_ADMIN`):
+- **Cómo se da:** solo con `EMIFY_SUPER_ADMINS` (correos). `SuperAdminBootstrap` al arrancar pone el rol a esas cuentas
+  (si existen y están activas) y se lo quita a cualquier otra; cada cambio queda en la bitácora. No hay endpoint para
+  darlo. ⚠️ Registra la cuenta (con su código) **antes** de poner el correo en la lista: la invitación de equipo crea
+  cuentas sin verificar el correo, así que alguien podría registrar ese correo primero.
+- **Doble candado:** `SecurityConfig` exige `ROLE_SUPER_ADMIN` en `/api/admin/**` y `AdminGuard` además revisa que el
+  correo siga en la lista.
+- **Trazabilidad:** toda consulta se guarda (`VIEW_*`, con filtros). Todo cambio exige motivo (≥ 5 caracteres) y
+  reautenticación vigente (`POST /admin/reauth`, 15 min en esa sesión, `REAUTH_REQUIRED` si no) y guarda antes/después
+  **en la misma transacción** (si la bitácora falla, el cambio se deshace). Intentos rechazados (`*_REJECTED`,
+  `REAUTH_FAILED`, `REAUTH_REQUIRED`) también quedan. La tabla no admite UPDATE ni DELETE (trigger).
+- ⚠️ `AdminAuditService.logRead/logAttempt` usan `REQUIRES_NEW`: llámalos **fuera** de otra transacción. Con SQLite el
+  pool tiene una sola conexión y una transacción anidada se queda esperando (pasó con la reautenticación).
+- ⚠️ Para cambiar `user_sessions` usa UPDATE directos (`elevate`, `touch`, `rotate`): con open-in-view, guardar la
+  entidad completa podría pisar el token recién rotado.
+- Pagos: se registran a mano (Clip después). Un error se anula, no se borra. Los planes se archivan.
 
 ---
 
@@ -476,12 +554,17 @@ la tabla por el CHECK), y actualiza el enum Java.
   se comparte entre instancias. Con más de una instancia, moverlo a la BD o a Redis.
 - **Sin recuperación de contraseña** (falta SMTP): quien la olvida no puede entrar.
 - **Secreto por default** en `application-prod.yml` / `Dockerfile` (password de BD).
-- `recent-sales`, `upcoming-appointments`, `top-services`, `top-staff` y `clients` usan `requireOwnerOrStaff` aunque
-  la tabla de §5.2 dice "Dueño": un barbero puede leer las ventas y la lista de clientes (con teléfonos) de su
-  sucursal llamando la API directo. Pendiente de decidir con Emilio.
+- **Unirse con invitación marca el correo como verificado sin verificarlo** (`TeamService.joinByInvite`): cualquiera
+  con un código puede crear una cuenta con un correo ajeno que todavía no esté registrado. Afecta a la etiqueta
+  "temporal" y a quién se le podría dar el super admin (ver §5.4). Solución: mandar código al correo también ahí.
 - `RestaurantService` usa `LocalDate.now()` / `LocalDateTime.now()` (líneas ~312 y ~355) en vez de `BusinessClock`.
 
 **Resto**
+
+- Suscripciones: nada pasa `subscription_status` a `expired` ni suspende al vencer; el panel calcula
+  `effective_status` con la fecha. `plans.max_locations` todavía no se hace cumplir.
+- Los listados del super admin juntan barberías y restaurantes en memoria y hacen N+1 (bien para cientos de negocios).
+- La IP de la bitácora sale de `X-Forwarded-For` (se puede falsear si se llama directo al backend, sin el proxy).
 
 - `RestaurantService.getRestaurant(id)` no valida que quien consulta sea el dueño (en barbería ya se corrigió).
 - No hay pruebas de integración. El primer candidato es el flujo de citas (horarios, empalme por persona y asistencia).

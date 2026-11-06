@@ -57,6 +57,10 @@ public class UserSession {
     @Column(name = "revoked_reason", length = 40)
     private String revokedReason;
 
+    /** Hasta cuándo vale la reautenticación (contraseña) del super admin para acciones sensibles (V11). */
+    @Column(name = "elevated_until")
+    private LocalDateTime elevatedUntil;
+
     @Column(name = "ip_address", length = 64)
     private String ipAddress;
 

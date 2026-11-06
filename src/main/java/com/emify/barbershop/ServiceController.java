@@ -60,7 +60,7 @@ public class ServiceController {
             @Valid @RequestBody ServiceRequest request,
             Authentication authentication) {
 
-        BarbershopLocation location = access.requireOwner(CurrentUser.require(authentication), locationId);
+        BarbershopLocation location = access.requireManagerForWrite(CurrentUser.require(authentication), locationId);
 
         BarberService service = BarberService.builder()
                 .location(location)
@@ -85,7 +85,7 @@ public class ServiceController {
             @RequestBody ServiceRequest request,
             Authentication authentication) {
 
-        access.requireOwner(CurrentUser.require(authentication), locationId);
+        access.requireManagerForWrite(CurrentUser.require(authentication), locationId);
         BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
                 .orElseThrow(() -> ApiException.notFound("Servicio no encontrado"));
 
@@ -129,7 +129,7 @@ public class ServiceController {
 
     private ResponseEntity<ApiResponse<?>> delete(Long locationId, Long serviceId, Authentication authentication) {
         User user = CurrentUser.require(authentication);
-        access.requireOwner(user, locationId);
+        access.requireManagerForWrite(user, locationId);
         BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
                 .orElseThrow(() -> ApiException.notFound("Servicio no encontrado"));
 
@@ -156,7 +156,7 @@ public class ServiceController {
             @RequestParam("image") MultipartFile image,
             Authentication authentication) {
 
-        access.requireOwner(CurrentUser.require(authentication), locationId);
+        access.requireManagerForWrite(CurrentUser.require(authentication), locationId);
         BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
                 .orElseThrow(() -> ApiException.notFound("Servicio no encontrado"));
 
@@ -189,7 +189,7 @@ public class ServiceController {
             @PathVariable Long imageId,
             Authentication authentication) {
 
-        access.requireOwner(CurrentUser.require(authentication), locationId);
+        access.requireManagerForWrite(CurrentUser.require(authentication), locationId);
         BarberService service = serviceRepository.findByIdAndLocationId(serviceId, locationId)
                 .orElseThrow(() -> ApiException.notFound("Servicio no encontrado"));
         ServiceImage img = serviceImageRepository.findByIdAndServiceId(imageId, serviceId)

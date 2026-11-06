@@ -12,6 +12,8 @@ import java.util.Optional;
 public interface BarbershopStaffRepository extends JpaRepository<BarbershopStaff, Long> {
     List<BarbershopStaff> findByLocationIdAndIsActiveTrue(Long locationId);
     List<BarbershopStaff> findByLocationIdAndIsActiveTrueOrderByIdAsc(Long locationId);
+    /** Personal al que se le pueden agendar citas (V11: una recepcionista que no atiende tiene bookable = false). */
+    List<BarbershopStaff> findByLocationIdAndIsActiveTrueAndBookableTrueOrderByIdAsc(Long locationId);
     Optional<BarbershopStaff> findByUserIdAndLocationId(Long userId, Long locationId);
     Optional<BarbershopStaff> findFirstByUserIdAndIsActiveTrue(Long userId);
     List<BarbershopStaff> findByUserIdAndIsActiveTrueOrderByIdAsc(Long userId);

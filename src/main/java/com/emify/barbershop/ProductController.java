@@ -48,7 +48,7 @@ public class ProductController {
                                                  @RequestParam(name = "is_active", required = false) String isActive,
                                                  @RequestParam(required = false) MultipartFile image,
                                                  Authentication authentication) {
-        BarbershopLocation location = access.requireOwner(CurrentUser.require(authentication), locationId);
+        BarbershopLocation location = access.requireManagerForWrite(CurrentUser.require(authentication), locationId);
         Product product = Product.builder()
                 .location(location)
                 .name(requireName(name))
@@ -72,7 +72,7 @@ public class ProductController {
                                                  @RequestParam(name = "is_active", required = false) String isActive,
                                                  @RequestParam(required = false) MultipartFile image,
                                                  Authentication authentication) {
-        access.requireOwner(CurrentUser.require(authentication), locationId);
+        access.requireManagerForWrite(CurrentUser.require(authentication), locationId);
         Product product = productRepository.findByIdAndLocationId(productId, locationId)
                 .orElseThrow(() -> ApiException.notFound("Producto no encontrado"));
 
@@ -92,7 +92,7 @@ public class ProductController {
     public ResponseEntity<ApiResponse<?>> delete(@PathVariable Long locationId,
                                                  @PathVariable Long productId,
                                                  Authentication authentication) {
-        access.requireOwner(CurrentUser.require(authentication), locationId);
+        access.requireManagerForWrite(CurrentUser.require(authentication), locationId);
         Product product = productRepository.findByIdAndLocationId(productId, locationId)
                 .orElseThrow(() -> ApiException.notFound("Producto no encontrado"));
         productRepository.delete(product);

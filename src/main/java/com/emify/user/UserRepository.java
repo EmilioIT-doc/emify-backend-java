@@ -3,6 +3,7 @@ package com.emify.user;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.stereotype.Repository;
 import org.springframework.data.jpa.repository.Query;
+import java.util.List;
 import java.util.Optional;
 
 @Repository
@@ -13,4 +14,5 @@ public interface UserRepository extends JpaRepository<User, Long> {
     // Los correos se guardan en minúsculas desde el registro; IgnoreCase cubre cuentas viejas con mayúsculas
     Optional<User> findByEmailIgnoreCase(String email);
     boolean existsByEmailIgnoreCase(String email);
-}
+    List<User> findByPlatformRole(String platformRole);
+}

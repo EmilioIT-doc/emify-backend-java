@@ -25,7 +25,8 @@ public class AttendanceController {
 
     // POST /api/attendance/walk-in — cliente imprevisto (llegó sin cita)
     //   body: {"location_id": 1, "service_id": 2, "start_time": "2026-11-05T13:20:00" (opcional = ahora),
-    //          "payment_method": "efectivo"|"tarjeta"|"transferencia", "client_name": "opcional"}
+    //          "payment_method": "efectivo"|"tarjeta"|"transferencia", "client_name": "opcional",
+    //          "staff_id": opcional — solo dueño o recepción: a qué barbero se le registra (default: quien lo registra)}
     @PostMapping("/walk-in")
     public ResponseEntity<ApiResponse<?>> walkIn(@RequestBody Map<String, Object> body, Authentication authentication) {
         return ResponseEntity.ok(attendanceService.registerWalkIn(
@@ -34,7 +35,8 @@ public class AttendanceController {
                 asLong(body.get("service_id")),
                 body.get("start_time") != null ? body.get("start_time").toString() : null,
                 body.get("payment_method") != null ? body.get("payment_method").toString() : null,
-                body.get("client_name") != null ? body.get("client_name").toString() : null));
+                body.get("client_name") != null ? body.get("client_name").toString() : null,
+                asLong(body.get("staff_id"))));
     }
 
     private static Long asLong(Object value) {

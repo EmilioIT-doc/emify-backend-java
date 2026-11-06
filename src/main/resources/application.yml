@@ -58,6 +58,12 @@ emify:
   dev:
     # Mientras no haya SMTP, regresa el código de verificación en la respuesta (solo local).
     expose-verification-code: false
+  admin:
+    # Correos de las cuentas super admin, separados por coma. Es la única forma de dar el rol (ver SuperAdminBootstrap).
+    # Registra la cuenta ANTES de ponerla aquí y reinicia el backend para que tome el cambio.
+    super-admins: ${EMIFY_SUPER_ADMINS:}
+    # Cuánto vale la confirmación con contraseña para hacer cambios desde el panel de administración
+    reauth-window: 15m
   uploads:
     # Guarda imágenes (referencia de citas, productos) en disco y las sirve en /uploads/**.
     # Es para pruebas locales; en el servidor debería ir a S3 o similar.

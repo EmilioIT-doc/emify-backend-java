@@ -37,7 +37,8 @@ public class RestaurantOrderingService {
             return ApiResponse.fail("Restaurante no encontrado");
         }
 
-        return ApiResponse.ok("Get success", Map.of("location", buildPublicLocationMap(location, restaurant)));
+        return ApiResponse.ok("Get success", Map.of("location", buildPublicLocationMap(location, restaurant),
+                "orders_paused", restaurant.isSuspended()));
     }
 
     // -------------------------------------------------------
@@ -54,6 +55,9 @@ public class RestaurantOrderingService {
         RestaurantLocation location = locationRepository.findByIdAndDeletedAtIsNull(locationId).orElse(null);
         if (location == null) {
             return ApiResponse.fail("Sucursal no encontrada");
+        }
+        if (location.getRestaurant().isSuspended()) {
+            return ApiResponse.fail("BOOKINGS_PAUSED", "Este negocio no está recibiendo pedidos por ahora.");
         }
         if (items == null || items.isEmpty()) {
             return ApiResponse.fail("El pedido no tiene artículos");

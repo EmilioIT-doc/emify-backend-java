@@ -49,12 +49,13 @@ public class BarbershopDashboardService {
     // -------------------------------------------------------
     // CALENDARIO — GET /location/{id}/calendar?date=YYYY-MM-DD
     // -------------------------------------------------------
-    // El dueño ve todo. El barbero ve completas SUS citas y de las de su equipo solo cliente, servicio y horario
+    // El dueño y la recepción (V11) ven todo. El barbero ve completas SUS citas y de las de su equipo solo cliente, servicio y horario
     // (sin teléfono, precio, notas, foto ni método de pago). "my_staff_id" = su registro de personal en esta
     // sucursal (también el del dueño si atiende aquí), para marcar su columna como "Tú".
     public ApiResponse<?> getCalendar(User user, Long locationId, String date) {
-        BarbershopLocation location = access.requireOwnerOrStaff(user, locationId);
-        boolean isOwner = access.isOwner(user, location);
+        LocationAccessService.LocationAccess acc = access.resolve(user, locationId);
+        boolean isOwner = acc.isOwner();
+        boolean canManage = acc.canManage();
         Long myStaffId = staffRepository.findByUserIdAndLocationId(user.getId(), locationId)
                 .filter(BarbershopStaff::isActive)
                 .map(BarbershopStaff::getId)
@@ -68,7 +69,7 @@ public class BarbershopDashboardService {
                     Map<String, Object> map = calendarAppointment(a);
                     boolean mine = myStaffId != null && a.getStaff() != null && myStaffId.equals(a.getStaff().getId());
                     map.put("is_mine", mine);
-                    if (!isOwner && !mine) {
+                    if (!canManage && !mine) {
                         for (String key : List.of("token", "phone", "price", "payment_method", "notes", "reference_image_url",
                                 "reference_images", "products")) {
                             map.remove(key);
@@ -78,7 +79,9 @@ public class BarbershopDashboardService {
                 })
                 .toList();
 
+        // Columnas del calendario: solo quien tiene agenda (bookable). Una recepcionista que no atiende no sale.
         List<Map<String, Object>> staff = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId).stream()
+                .filter(BarbershopStaff::isBookable)
                 .map(s -> {
                     Map<String, Object> map = new LinkedHashMap<>();
                     map.put("id", s.getId());
@@ -99,6 +102,9 @@ public class BarbershopDashboardService {
         data.put("appointments", appointments);
         data.put("staff", staff);
         data.put("is_owner", isOwner);
+        data.put("can_manage", canManage);
+        data.put("access_level", acc.level().name().toLowerCase());
+        data.put("suspended", acc.suspended());
         data.put("my_staff_id", myStaffId);
         data.put("opens_at", schedule.map(a -> a.getStartTime().format(HH_MM)).orElse(null));
         data.put("closes_at", schedule.map(a -> a.getEndTime().format(HH_MM)).orElse(null));
@@ -109,7 +115,7 @@ public class BarbershopDashboardService {
     // HOME: VENTAS RECIENTES (últimos 7 días, incluye hoy) — solo citas atendidas
     // -------------------------------------------------------
     public ApiResponse<?> getRecentSales(User user, Long locationId) {
-        access.requireOwnerOrStaff(user, locationId);
+        access.requireManager(user, locationId); // Inicio: dueño o recepción (V11)
         LocalDate today = clock.today();
         LocalDate first = today.minusDays(6);
 
@@ -158,7 +164,7 @@ public class BarbershopDashboardService {
     // rango anterior HASTA EL MISMO PUNTO (lunes 11:30 vs. el lunes anterior 11:30).
     // -------------------------------------------------------
     public ApiResponse<?> getSales(User user, Long locationId, String period, String date) {
-        access.requireOwnerOrStaff(user, locationId);
+        access.requireManager(user, locationId); // Inicio: dueño o recepción (V11)
         String p = period.trim().toLowerCase(Locale.ROOT);
         LocalDateTime now = clock.now();
         LocalDate anchor = date == null || date.isBlank() ? now.toLocalDate() : clock.parseDate(date);
@@ -290,7 +296,7 @@ public class BarbershopDashboardService {
     // HOME: PRÓXIMAS CITAS (desde ahora, próximos 7 días)
     // -------------------------------------------------------
     public ApiResponse<?> getUpcomingAppointments(User user, Long locationId) {
-        access.requireOwnerOrStaff(user, locationId);
+        access.requireManager(user, locationId); // Inicio: dueño o recepción (V11)
         LocalDateTime now = clock.now();
 
         List<Map<String, Object>> appointments = appointmentRepository
@@ -321,7 +327,7 @@ public class BarbershopDashboardService {
     // HOME: TOP SERVICIOS (este mes vs. mes pasado)
     // -------------------------------------------------------
     public ApiResponse<?> getTopServices(User user, Long locationId) {
-        access.requireOwnerOrStaff(user, locationId);
+        access.requireManager(user, locationId); // Inicio: dueño o recepción (V11)
         YearMonth thisMonth = YearMonth.from(clock.today());
         YearMonth lastMonth = thisMonth.minusMonths(1);
 
@@ -356,7 +362,7 @@ public class BarbershopDashboardService {
     // HOME: TOP STAFF (este mes, por ingresos)
     // -------------------------------------------------------
     public ApiResponse<?> getTopStaff(User user, Long locationId) {
-        access.requireOwnerOrStaff(user, locationId);
+        access.requireManager(user, locationId); // Inicio: dueño o recepción (V11)
         YearMonth thisMonth = YearMonth.from(clock.today());
 
         List<Appointment> appointments = appointmentRepository.findByLocationBetween(
@@ -365,7 +371,9 @@ public class BarbershopDashboardService {
                 .filter(a -> a.getStaff() != null)
                 .collect(Collectors.groupingBy(a -> a.getStaff().getId()));
 
+        // Columnas del calendario: solo quien tiene agenda (bookable). Una recepcionista que no atiende no sale.
         List<Map<String, Object>> staff = staffRepository.findByLocationIdAndIsActiveTrueOrderByIdAsc(locationId).stream()
+                .filter(BarbershopStaff::isBookable)
                 .map(s -> {
                     List<Appointment> list = byStaff.getOrDefault(s.getId(), List.of());
                     Map<String, Object> map = new LinkedHashMap<>();

@@ -96,4 +96,24 @@ public class TeamController {
     public ResponseEntity<ApiResponse<?>> remove(@PathVariable Long id, Authentication authentication) {
         return ResponseEntity.ok(teamService.removeStaff(CurrentUser.require(authentication), id));
     }
+
+    // POST /api/team/staff/{id}/receptionist   body: {value: true|false} — solo el dueño (una por sucursal)
+    @PostMapping("/staff/{id}/receptionist")
+    public ResponseEntity<ApiResponse<?>> receptionist(@PathVariable Long id, @RequestBody Map<String, Object> body,
+                                                       Authentication authentication) {
+        return ResponseEntity.ok(teamService.setReceptionist(CurrentUser.require(authentication), id, bool(body.get("value"))));
+    }
+
+    // POST /api/team/staff/{id}/bookable   body: {value: true|false} — solo el dueño
+    @PostMapping("/staff/{id}/bookable")
+    public ResponseEntity<ApiResponse<?>> bookable(@PathVariable Long id, @RequestBody Map<String, Object> body,
+                                                   Authentication authentication) {
+        return ResponseEntity.ok(teamService.setBookable(CurrentUser.require(authentication), id, bool(body.get("value"))));
+    }
+
+    private static Boolean bool(Object value) {
+        if (value instanceof Boolean b) return b;
+        if (value instanceof String s && (s.equalsIgnoreCase("true") || s.equalsIgnoreCase("false"))) return Boolean.valueOf(s);
+        return null;
+    }
 }

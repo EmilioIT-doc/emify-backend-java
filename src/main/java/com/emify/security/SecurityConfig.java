@@ -9,6 +9,7 @@ import com.emify.security.session.SessionService;
 import com.emify.user.UserRepository;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
+import com.emify.admin.AdminProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -37,7 +38,7 @@ import java.io.IOException;
  */
 @Configuration
 @EnableWebSecurity
-@EnableConfigurationProperties(SessionProperties.class)
+@EnableConfigurationProperties({SessionProperties.class, AdminProperties.class})
 @RequiredArgsConstructor
 public class SecurityConfig {
 
@@ -66,6 +67,8 @@ public class SecurityConfig {
                         .requestMatchers("/api/booking/**").permitAll()
                         .requestMatchers("/api/ordering/**").permitAll()
                         .requestMatchers("/api/team/invite/**").permitAll() // unirse a un negocio con código, sin sesión
+                        // Panel del super admin (V11). AdminGuard además revisa EMIFY_SUPER_ADMINS y la reautenticación.
+                        .requestMatchers("/api/admin/**").hasRole("SUPER_ADMIN")
                         .anyRequest().authenticated()
                 )
                 .exceptionHandling(e -> e

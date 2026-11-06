@@ -39,6 +39,16 @@ public class BarbershopStaff {
     @Builder.Default
     private boolean isActive = true;
 
+    /** Recepcionista de la sucursal (V11). Lo elige solo el dueño; máximo uno por sucursal. */
+    @Column(name = "is_receptionist", nullable = false)
+    @Builder.Default
+    private boolean receptionist = false;
+
+    /** Si aparece en la página de reservas y tiene agenda propia (V11). Una recepcionista que no corta pelo = false. */
+    @Column(name = "bookable", nullable = false)
+    @Builder.Default
+    private boolean bookable = true;
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
 
@@ -59,4 +69,4 @@ public class BarbershopStaff {
     public enum Role {
         barber, admin, manager
     }
-}
+}

@@ -1,5 +1,6 @@
 package com.emify.barbershop;
 
+import com.emify.user.AccountCapabilities;
 import com.emify.auth.dto.ApiResponse;
 import com.emify.user.User;
 import lombok.RequiredArgsConstructor;
@@ -20,6 +21,8 @@ public class BarbershopService {
     private final ServiceRepository serviceRepository;
     private final AvailabilityRepository availabilityRepository;
     private final BarbershopStaffRepository staffRepository;
+    private final LocationAccessService access;
+    private final AccountCapabilities capabilities;
 
     private static final List<Map<String, Object>> DEFAULT_SERVICES = List.of(
             Map.of("name", "Corte",                    "description", "Corte clásico a tu elección",       "price", 160, "duration", 30),
@@ -40,6 +43,8 @@ public class BarbershopService {
         if (businessName == null || businessName.isBlank()) {
             return ApiResponse.fail("El nombre del negocio es requerido");
         }
+        // El personal (barbero / recepción de otro dueño) no agrega negocios; el dueño y quien agenda sí
+        capabilities.requireCanCreateBusiness(user);
 
         // Un dueño puede tener varias barberías (marcas distintas). Se reutiliza una existente cuando:
         // - el wizard manda barbershop_id (regresó al paso 1 y lo volvió a enviar), o
@@ -51,6 +56,7 @@ public class BarbershopService {
                     .filter(b -> b.getOwner().getId().equals(user.getId()))
                     .orElse(null);
             if (barbershop == null) return ApiResponse.fail("Barbería no encontrada");
+            access.ensureWritable(barbershop);
         } else {
             barbershop = barbershopRepository.findByOwnerIdOrderByIdAsc(user.getId()).stream()
                     .filter(b -> !locationRepository.existsByBarbershopIdAndDeletedAtIsNull(b.getId()))
@@ -79,6 +85,7 @@ public class BarbershopService {
         if (barbershop == null) {
             return ApiResponse.fail(barbershopId != null ? "Barbería no encontrada" : "No tienes una barbería registrada");
         }
+        access.ensureWritable(barbershop);
 
         List<Map<String, Object>> result = new ArrayList<>();
 
@@ -203,6 +210,7 @@ public class BarbershopService {
         if (barbershop == null) {
             return ApiResponse.fail("Barbería no encontrada");
         }
+        access.ensureWritable(barbershop);
 
         // Se valida antes de tocar la entidad (dentro de la transacción cualquier cambio se guardaría)
         String theme = null;
@@ -242,6 +250,7 @@ public class BarbershopService {
             return ApiResponse.fail("Sucursal no encontrada");
         }
 
+        access.ensureWritable(location.getBarbershop());
         locationRepository.clearDefaultByBarbershopId(location.getBarbershop().getId());
         location.setDefault(true);
         locationRepository.save(location);
@@ -261,6 +270,7 @@ public class BarbershopService {
             return ApiResponse.fail("Sucursal no encontrada");
         }
 
+        access.ensureWritable(location.getBarbershop());
         location.setDeletedAt(LocalDateTime.now());
         locationRepository.save(location);
 
@@ -297,6 +307,7 @@ public class BarbershopService {
         if (location == null) {
             return ApiResponse.fail("Sucursal no encontrada");
         }
+        access.ensureWritable(location.getBarbershop());
         if (bufferMinutes != null && (bufferMinutes < 0 || bufferMinutes > 120)) {
             return ApiResponse.fail("El tiempo entre citas debe estar entre 0 y 120 minutos");
         }
@@ -414,6 +425,10 @@ public class BarbershopService {
         map.put("subscription_status", b.getSubscriptionStatus());
         map.put("booking_theme", BookingTheme.themeOf(b.getBookingTheme()));
         map.put("booking_accent", b.getBookingAccent());
+        map.put("subscription_ends_at", b.getSubscriptionEndsAt());
+        map.put("suspended", b.isSuspended());
+        map.put("suspended_at", b.getSuspendedAt());
+        map.put("suspension_reason", b.getSuspensionReason());
         map.put("created_at", b.getCreatedAt());
         map.put("updated_at", b.getUpdatedAt());
         return map;
@@ -452,4 +467,4 @@ public class BarbershopService {
         map.put("owner_is_staff", staff.stream().anyMatch(s -> s.getUser().getId().equals(ownerId)));
         return map;
     }
-}
+}
