@@ -32,11 +32,6 @@ spring:
       max-file-size: 10MB
       max-request-size: 12MB
 
-  security:
-    jwt:
-      secret: emify-super-secret-key-para-jwt-2026-cambiar-en-produccion
-      expiration: 86400000
-
   kafka:
     bootstrap-servers: localhost:9092
     producer:
@@ -68,6 +63,18 @@ emify:
     # Es para pruebas locales; en el servidor debería ir a S3 o similar.
     enabled: false
     dir: ./uploads
+  # Sesiones (cookie HttpOnly + tabla user_sessions). Ver security/session/SessionProperties.
+  session:
+    cookie-name: emify_session
+    cookie-secure: true          # en local (http) lo apagan los perfiles sqlite/postgres
+    same-site: Lax
+    idle-timeout: 7d             # sin usar la app 7 días → se cierra
+    absolute-timeout: 30d        # a los 30 días siempre vuelve a pedir contraseña
+    rotation-interval: 24h       # el token de la cookie se renueva cada día
+    rotation-grace: 2m
+    touch-interval: 5m
+    single-session: false        # true = una sola sesión activa por cuenta
+    max-active: 10
 
 logging:
   level:

@@ -19,5 +19,7 @@ spring:
 emify:
   dev:
     expose-verification-code: true
+  session:
+    cookie-secure: false   # local por http
   uploads:
     enabled: true

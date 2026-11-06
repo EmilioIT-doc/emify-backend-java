@@ -30,7 +30,7 @@ EXPOSE 8080
 ENV SPRING_PROFILES_ACTIVE=prod
 ENV DB_USERNAME=postgres
 ENV DB_PASSWORD=postgres123
-ENV JWT_SECRET=emify-super-secret-key-para-jwt-2026
+# Ya no hay JWT: las sesiones viven en la BD (tabla user_sessions). Para una sola sesión por cuenta: EMIFY_SINGLE_SESSION=true
 
 # Arrancar la app
 ENTRYPOINT ["java", "-jar", "app.jar"]

@@ -23,11 +23,6 @@ spring:
     user: ${DB_USERNAME:postgres}
     password: ${DB_PASSWORD:postgres123}
 
-  security:
-    jwt:
-      secret: ${JWT_SECRET:emify-super-secret-key-para-jwt-2026-cambiar-en-produccion}
-      expiration: 86400000
-
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
@@ -51,6 +46,11 @@ server:
 emify:
   kafka:
     enabled: true
+  session:
+    # __Host- obliga al navegador a exigir Secure, Path=/ y sin Domain (no se puede compartir con subdominios)
+    cookie-name: __Host-emify_session
+    cookie-secure: true
+    single-session: ${EMIFY_SINGLE_SESSION:false}
   uploads:
     # El contenedor no guarda archivos entre reinicios; las imágenes se ignoran hasta tener S3
     enabled: false

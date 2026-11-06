@@ -7,34 +7,51 @@ import com.emify.barbershop.BarbershopLocationRepository;
 import com.emify.barbershop.BarbershopRepository;
 import com.emify.barbershop.BarbershopStaff;
 import com.emify.barbershop.BarbershopStaffRepository;
+import com.emify.common.ApiException;
 import com.emify.restaurant.Restaurant;
 import com.emify.restaurant.RestaurantLocationRepository;
 import com.emify.restaurant.RestaurantRepository;
-import com.emify.security.JwtUtil;
+import com.emify.security.LoginAttemptService;
+import com.emify.security.PasswordPolicy;
+import com.emify.security.session.AuthEventService;
+import com.emify.security.session.SessionService;
 import com.emify.user.User;
 import com.emify.user.UserRepository;
+import jakarta.annotation.PostConstruct;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.BadCredentialsException;
-import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
-import java.util.Random;
+import java.util.UUID;
 
+/**
+ * Registro, login y perfil. La sesión (cookie HttpOnly) la abre SessionService: el token nunca viaja en el
+ * cuerpo de la respuesta ni lo ve JavaScript.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class AuthService {
+
+    /** Intentos permitidos con un mismo código de verificación antes de invalidarlo. */
+    private static final int MAX_CODE_ATTEMPTS = 5;
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final UserRepository userRepository;
     private final BarbershopRepository barbershopRepository;
@@ -44,11 +61,15 @@ public class AuthService {
     private final RestaurantLocationRepository restaurantLocationRepository;
     private final EmailVerificationCodeRepository verificationCodeRepository;
     private final PasswordEncoder passwordEncoder;
-    private final JwtUtil jwtUtil;
-    private final AuthenticationManager authenticationManager;
+    private final SessionService sessionService;
+    private final AuthEventService authEvents;
+    private final LoginAttemptService loginAttempts;
 
     @Value("${emify.dev.expose-verification-code:false}")
     private boolean exposeVerificationCode;
+
+    /** Hash de relleno: si el correo no existe igual se calcula bcrypt, para no revelar qué correos tienen cuenta. */
+    private String dummyHash;
 
     private static final List<String> AVATARS = List.of(
             "https://emify-media.s3.us-east-2.amazonaws.com/avatars/chamuel.png",
@@ -57,72 +78,94 @@ public class AuthService {
             "https://emify-media.s3.us-east-2.amazonaws.com/avatars/leandros.png"
     );
 
+    @PostConstruct
+    void initDummyHash() {
+        dummyHash = passwordEncoder.encode(UUID.randomUUID().toString());
+    }
+
+    public static String normalizeEmail(String email) {
+        return email == null ? null : email.trim().toLowerCase(Locale.ROOT);
+    }
+
     // -------------------------------------------------------
     // SEND VERIFICATION CODE
     // -------------------------------------------------------
-    public ApiResponse<?> sendVerificationCode(String email) {
-        // Verificar si ya está registrado
-        if (userRepository.existsByEmail(email)) {
+    public ApiResponse<?> sendVerificationCode(String rawEmail) {
+        String email = normalizeEmail(rawEmail);
+        if (email == null || email.isBlank()) {
+            return ApiResponse.fail("Escribe tu correo");
+        }
+        // Verificar si ya está registrado (el frontend compara este texto exacto)
+        if (userRepository.existsByEmailIgnoreCase(email)) {
             return ApiResponse.fail("Este correo ya está registrado");
         }
+        // Máximo 1 código por minuto y 5 por hora por correo
+        loginAttempts.checkCodeRequest(email);
 
-        // Generar código de 6 dígitos
-        String code = String.format("%06d", new Random().nextInt(1000000));
+        // Código de 6 dígitos con un generador seguro (antes era java.util.Random)
+        String code = String.format("%06d", RANDOM.nextInt(1_000_000));
 
-        // Guardar o actualizar en DB (updateOrInsert como Laravel)
         EmailVerificationCode record = verificationCodeRepository
                 .findByEmail(email)
                 .orElse(EmailVerificationCode.builder().email(email).build());
 
         record.setCode(code);
+        record.setAttempts(0);
         record.setExpiresAt(LocalDateTime.now().plusMinutes(10));
         verificationCodeRepository.save(record);
 
-        // Intentar enviar email — si falla, no importa (dev mode)
-        try {
-            // TODO: configurar SMTP para producción
-            // mailService.sendVerificationCode(email, code);
-            log.info("📧 Código de verificación para {}: {}", email, code);
-        } catch (Exception e) {
-            log.warn("No se pudo enviar el email: {}", e.getMessage());
-            // No retornamos error — solo logueamos
+        // TODO: configurar SMTP para producción (mailService.sendVerificationCode(email, code)).
+        // Sin SMTP el código solo existe en el log del servidor y, en local, en la respuesta.
+        if (exposeVerificationCode) {
+            log.info("Código de verificación para {}: {}", email, code);
         }
 
-        // Solo en local (emify.dev.expose-verification-code): sin SMTP no hay forma de
-        // recibir el código, así que se regresa para que el frontend lo muestre.
         return ApiResponse.ok("Código de verificación enviado",
                 exposeVerificationCode ? Map.of("dev_code", code) : null);
     }
 
     // -------------------------------------------------------
-    // CREATE USER (register con código)
+    // CREATE USER (registro con código) → abre la sesión
     // -------------------------------------------------------
-    public ApiResponse<?> createUser(CreateUserRequest request) {
-        // Verificar código
-        EmailVerificationCode record = verificationCodeRepository
-                .findByEmailAndCode(request.getEmail(), request.getCode())
-                .orElse(null);
+    // Sin @Transactional a propósito: los intentos fallidos del código deben quedar guardados aunque se responda error,
+    // y el registro de actividad (dentro de la sesión) no debe poder deshacer la cuenta recién creada.
+    public ApiResponse<?> createUser(CreateUserRequest request, HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        String email = normalizeEmail(request.getEmail());
 
+        EmailVerificationCode record = verificationCodeRepository.findByEmail(email).orElse(null);
+        // Los textos de estos dos errores los compara el frontend (muestra "Reenviar código")
         if (record == null) {
             return ApiResponse.fail("Código de verificación inválido");
         }
-
         if (LocalDateTime.now().isAfter(record.getExpiresAt())) {
             return ApiResponse.fail("El código de verificación ha expirado");
         }
-
-        // Verificar que el email no esté ya registrado
-        if (userRepository.existsByEmail(request.getEmail())) {
-            return ApiResponse.fail("Este correo ya está registrado");
+        boolean codeMatches = request.getCode() != null && MessageDigest.isEqual(
+                record.getCode().getBytes(StandardCharsets.UTF_8), request.getCode().getBytes(StandardCharsets.UTF_8));
+        if (!codeMatches) {
+            // Cada código aguanta 5 intentos; después hay que pedir otro (frena adivinar los 6 dígitos)
+            int attempts = record.getAttempts() + 1;
+            if (attempts >= MAX_CODE_ATTEMPTS) {
+                verificationCodeRepository.deleteByEmail(email);
+            } else {
+                record.setAttempts(attempts);
+                verificationCodeRepository.save(record);
+            }
+            return ApiResponse.fail("Código de verificación inválido");
         }
 
-        // Avatar random
-        String avatarUrl = AVATARS.get(new Random().nextInt(AVATARS.size()));
+        if (userRepository.existsByEmailIgnoreCase(email)) {
+            return ApiResponse.fail("Este correo ya está registrado");
+        }
+        PasswordPolicy.validate(request.getPassword());
 
-        // Crear usuario
+        String avatarUrl = AVATARS.get(RANDOM.nextInt(AVATARS.size()));
+
+        // Toda cuenta nace como "client" (quiere agendar citas). Si luego elige registrar un negocio,
+        // /auth/updateRole la marca como "owner"; el tipo de cuenta ya no se sobrescribe después.
         User user = User.builder()
-                .name(request.getName())
-                .email(request.getEmail())
+                .name(request.getName().trim())
+                .email(email)
                 .phone(request.getPhone())
                 .phoneCode(request.getPhoneCode())
                 .password(passwordEncoder.encode(request.getPassword()))
@@ -133,54 +176,71 @@ public class AuthService {
                 .build();
 
         userRepository.save(user);
+        verificationCodeRepository.deleteByEmail(email);
 
-        // Eliminar código usado
-        verificationCodeRepository.deleteByEmail(request.getEmail());
+        sessionService.start(user, AuthEventService.SIGNUP, httpRequest, httpResponse);
 
-        // Generar JWT
-        String token = generateToken(user);
-
-        return ApiResponse.ok("Usuario registrado exitosamente", Map.of(
-                "user", buildUserMap(user),
-                "token", token
-        ));
+        Map<String, Object> data = new HashMap<>(buildUserMap(user));
+        putBusinessInfo(data, user);
+        return ApiResponse.ok("Usuario registrado exitosamente", Map.of("user", data));
     }
 
     // -------------------------------------------------------
-    // LOGIN
+    // LOGIN → abre la sesión
     // -------------------------------------------------------
-    public ApiResponse<?> login(LoginRequest request) {
-        User user = userRepository.findByEmail(request.getEmail()).orElse(null);
+    public ApiResponse<?> login(LoginRequest request, HttpServletRequest httpRequest, HttpServletResponse httpResponse) {
+        String email = normalizeEmail(request.getEmail());
+        String password = request.getPassword();
+        loginAttempts.checkNotBlocked(email);
 
-        if (user == null || !passwordEncoder.matches(request.getPassword(), user.getPassword())) {
-            return ApiResponse.fail("Credenciales incorrectas");
+        User user = userRepository.findByEmailIgnoreCase(email).orElse(null);
+        boolean valid;
+        if (user == null) {
+            // Mismo trabajo que con un correo real: el tiempo de respuesta no revela si la cuenta existe
+            passwordEncoder.matches(password != null ? password : "", dummyHash);
+            valid = false;
+        } else {
+            valid = PasswordPolicy.fitsBcrypt(password) && passwordEncoder.matches(password, user.getPassword());
         }
 
+        if (!valid) {
+            boolean blocked = loginAttempts.recordFailure(email);
+            if (user != null) {
+                authEvents.log(user.getId(), null, blocked ? AuthEventService.LOGIN_BLOCKED : AuthEventService.LOGIN_FAILED,
+                        httpRequest, blocked ? "Bloqueo de 15 min por intentos fallidos" : null);
+            }
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "INVALID_CREDENTIALS", "Correo o contraseña incorrectos");
+        }
+        if (!user.isEnabled()) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "ACCOUNT_DISABLED", "Tu cuenta está desactivada.");
+        }
+        loginAttempts.reset(email);
+
+        // Hashes viejos (bcrypt costo 10) se actualizan al costo actual aprovechando que tenemos la contraseña
         try {
-            authenticationManager.authenticate(
-                    new UsernamePasswordAuthenticationToken(request.getEmail(), request.getPassword())
-            );
-        } catch (BadCredentialsException e) {
-            return ApiResponse.fail("Credenciales incorrectas");
+            if (passwordEncoder.upgradeEncoding(user.getPassword())) {
+                user.setPassword(passwordEncoder.encode(password));
+                userRepository.save(user);
+            }
+        } catch (RuntimeException e) {
+            log.warn("No se pudo actualizar el hash del usuario {}: {}", user.getId(), e.getMessage());
         }
 
-        String token = generateToken(user);
+        sessionService.start(user, AuthEventService.LOGIN, httpRequest, httpResponse);
 
         Map<String, Object> response = new HashMap<>();
-        response.put("token", token);
         response.put("role", user.getRole().name());
         putBusinessInfo(response, user);
         response.put("user", buildUserMap(user));
-
         return ApiResponse.ok("Autenticación exitosa", response);
     }
 
     // -------------------------------------------------------
-    // UPDATE ROLE
+    // UPDATE ROLE (tipo de cuenta elegido al registrarse: client u owner)
     // -------------------------------------------------------
-    public ApiResponse<?> updateRole(String email, String role) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("Usuario no encontrado"));
+    public ApiResponse<?> updateRole(User current, String role) {
+        User user = userRepository.findById(current.getId())
+                .orElseThrow(() -> ApiException.notFound("Usuario no encontrado"));
 
         user.setRole(User.Role.valueOf(role));
         userRepository.save(user);
@@ -194,9 +254,9 @@ public class AuthService {
     // GET ME (perfil del usuario logeado)
     // -------------------------------------------------------
     @Transactional(readOnly = true)
-    public ApiResponse<?> getMe(String email) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("Usuario no encontrado"));
+    public ApiResponse<?> getMe(User current) {
+        User user = userRepository.findById(current.getId())
+                .orElseThrow(() -> ApiException.notFound("Usuario no encontrado"));
 
         Map<String, Object> userMap = new HashMap<>(buildUserMap(user));
         putBusinessInfo(userMap, user);
@@ -207,9 +267,9 @@ public class AuthService {
     // -------------------------------------------------------
     // UPDATE PROFILE (nombre, teléfono, avatar — el email nunca se toca)
     // -------------------------------------------------------
-    public ApiResponse<?> updateProfile(String email, UpdateProfileRequest request) {
-        User user = userRepository.findByEmail(email)
-                .orElseThrow(() -> new RuntimeException("Usuario no encontrado"));
+    public ApiResponse<?> updateProfile(User current, UpdateProfileRequest request) {
+        User user = userRepository.findById(current.getId())
+                .orElseThrow(() -> ApiException.notFound("Usuario no encontrado"));
 
         if (request.getAvatarUrl() != null && !request.getAvatarUrl().isBlank()) {
             if (!AVATARS.contains(request.getAvatarUrl())) {
@@ -329,14 +389,6 @@ public class AuthService {
                 "name", location.getName(),
                 "barbershop_id", location.getBarbershop().getId()
         );
-    }
-
-    private String generateToken(User user) {
-        Map<String, Object> claims = Map.of(
-                "role", user.getRole().name(),
-                "userId", user.getId()
-        );
-        return jwtUtil.generateToken(user, claims);
     }
 
     private Map<String, Object> buildUserMap(User user) {

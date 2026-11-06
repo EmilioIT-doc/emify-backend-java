@@ -2,7 +2,6 @@ package com.emify.restaurant;
 
 import com.emify.auth.dto.ApiResponse;
 import com.emify.user.User;
-import com.emify.user.UserRepository;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -24,7 +23,6 @@ public class RestaurantService {
     private final RestaurantAvailabilityRepository availabilityRepository;
     private final RestaurantOrderRepository orderRepository;
     private final RestaurantOrderItemRepository orderItemRepository;
-    private final UserRepository userRepository;
 
     private static final String[] DAY_NAMES = {"Dom", "Lun", "Mar", "Mié", "Jue", "Vie", "Sáb"};
 
@@ -61,12 +59,7 @@ public class RestaurantService {
 
         restaurantRepository.save(restaurant);
 
-        // Mismo criterio que en barbería: el rol se sincroniza aquí, no depende
-        // de una llamada aparte del frontend a /auth/updateRole.
-        if (user.getRole() != User.Role.owner) {
-            user.setRole(User.Role.owner);
-            userRepository.save(user);
-        }
+        // Igual que en barbería: el tipo de cuenta no se sobrescribe; ser dueño se sabe por sus negocios.
 
         return ApiResponse.ok("Restaurante creado exitosamente", Map.of("restaurant", buildRestaurantMap(restaurant)));
     }

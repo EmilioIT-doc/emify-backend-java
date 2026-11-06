@@ -28,5 +28,8 @@ spring:
 emify:
   dev:
     expose-verification-code: true
+  session:
+    # Local por http (incluido el celular con la IP de la compu): una cookie Secure no se guardaría
+    cookie-secure: false
   uploads:
     enabled: true

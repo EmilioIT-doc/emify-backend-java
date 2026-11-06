@@ -5,7 +5,8 @@ import com.emify.barbershop.*;
 import com.emify.booking.AppointmentRepository;
 import com.emify.common.ApiException;
 import com.emify.common.BusinessClock;
-import com.emify.security.JwtUtil;
+import com.emify.security.LoginAttemptService;
+import com.emify.security.PasswordPolicy;
 import com.emify.user.User;
 import com.emify.user.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -48,7 +49,7 @@ public class TeamService {
     private final PasswordEncoder passwordEncoder;
     private final AppointmentRepository appointmentRepository;
     private final BusinessClock clock;
-    private final JwtUtil jwtUtil;
+    private final LoginAttemptService loginAttempts;
 
     // GET /api/team/location/{id}
     public ApiResponse<?> getTeam(User user, Long locationId) {
@@ -73,6 +74,7 @@ public class TeamService {
 
         String name = trim(body.get("name"));
         String email = trim(body.get("email"));
+        if (email != null) email = email.toLowerCase(Locale.ROOT);
         String phone = trim(body.get("phone"));
         String password = body.get("password");
 
@@ -80,11 +82,9 @@ public class TeamService {
         if (email == null || !email.matches("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")) {
             throw ApiException.unprocessable("Correo inválido");
         }
-        if (password == null || password.length() < 6) {
-            throw ApiException.unprocessable("La contraseña debe tener al menos 6 caracteres");
-        }
+        PasswordPolicy.validate(password);
 
-        if (userRepository.existsByEmail(email)) {
+        if (userRepository.existsByEmailIgnoreCase(email)) {
             throw ApiException.unprocessable(
                     "Ese correo ya tiene una cuenta. Pídele que se una con el código de invitación de la sucursal.");
         }
@@ -224,12 +224,8 @@ public class TeamService {
         }
         staff.setActive(true);
         staffRepository.save(staff);
-
-        // Un cliente que se une a un equipo pasa a ser barbero (el dueño se queda como owner)
-        if (user.getRole() == User.Role.client) {
-            user.setRole(User.Role.barber);
-            userRepository.save(user);
-        }
+        // El tipo de cuenta (users.role) NO cambia: una misma cuenta puede ser cliente, personal y dueño a la vez.
+        // Que trabaja aquí se sabe por barbershop_staff (ver "workplaces" en /auth/me).
 
         return ApiResponse.ok("Te uniste a " + location.getName(), Map.of(
                 "location", Map.of(
@@ -260,9 +256,12 @@ public class TeamService {
     //   Si ese teléfono ya era un cliente "guest" (reservó antes), se reutiliza esa cuenta en vez de duplicarla.
     // - Correo que ya tiene cuenta: se une con esa misma cuenta si la contraseña coincide; si no,
     //   responde 428 para que el frontend pida "la contraseña de tu cuenta de emify".
-    // Regresa un token para que entre directo a su agenda.
+    // Regresa la cuenta para que el controlador abra la sesión (cookie) y entre directo a su agenda.
+    public record InviteJoin(User user, Map<String, Object> location) {
+    }
+
     @Transactional
-    public ApiResponse<?> joinByInvite(String inviteCode, Map<String, String> body) {
+    public InviteJoin joinByInvite(String inviteCode, Map<String, String> body) {
         BarbershopLocation location = locationByInvite(inviteCode);
 
         String email = trim(body.get("email"));
@@ -271,17 +270,25 @@ public class TeamService {
             throw ApiException.unprocessable("Escribe un correo válido");
         }
         email = email.toLowerCase(Locale.ROOT);
-        if (password == null || password.length() < 6) {
-            throw ApiException.unprocessable("La contraseña debe tener al menos 6 caracteres");
+        if (password == null || password.isEmpty()) {
+            throw ApiException.unprocessable("Escribe tu contraseña");
         }
 
-        User user = userRepository.findByEmail(email).orElse(null);
+        User user = userRepository.findByEmailIgnoreCase(email).orElse(null);
         if (user != null) {
-            if (!passwordEncoder.matches(password, user.getPassword())) {
+            // Es un login: mismo freno contra fuerza bruta que /auth/login
+            loginAttempts.checkNotBlocked(email);
+            if (!PasswordPolicy.fitsBcrypt(password) || !passwordEncoder.matches(password, user.getPassword())) {
+                loginAttempts.recordFailure(email);
                 throw new ApiException(HttpStatus.PRECONDITION_REQUIRED,
                         "Ya tienes una cuenta en emify con este correo. Escribe la contraseña de esa cuenta para unirte.");
             }
+            if (!user.isEnabled()) {
+                throw new ApiException(HttpStatus.FORBIDDEN, "ACCOUNT_DISABLED", "Tu cuenta está desactivada.");
+            }
+            loginAttempts.reset(email);
         } else {
+            PasswordPolicy.validate(password);
             String name = trim(body.get("name"));
             String phone = trim(body.get("phone"));
             if (name == null) throw ApiException.unprocessable("Escribe tu nombre");
@@ -302,6 +309,7 @@ public class TeamService {
             user.setEmail(email);
             user.setPhone(phone);
             user.setPassword(passwordEncoder.encode(password));
+            // Cuenta nueva que nace para trabajar en un equipo (la de un cliente "guest" se convierte aquí en cuenta real)
             user.setRole(User.Role.barber);
             // Se marca para distinguirlo del personal "temporal" que crea el dueño (el correo no se verificó)
             user.setEmailVerifiedAt(clock.now());
@@ -314,13 +322,12 @@ public class TeamService {
                 .map(BarbershopStaff::isActive).orElse(false);
         if (!alreadyMember) joinWithCode(user, location.getInviteCode());
 
-        String token = jwtUtil.generateToken(user, Map.of("role", user.getRole().name(), "userId", user.getId()));
         Map<String, Object> loc = new LinkedHashMap<>();
         loc.put("id", location.getId());
         loc.put("name", location.getName());
         loc.put("barbershop_id", location.getBarbershop().getId());
         loc.put("barbershop_name", location.getBarbershop().getName());
-        return ApiResponse.ok("Te uniste a " + location.getName(), Map.of("token", token, "location", loc));
+        return new InviteJoin(user, loc);
     }
 
     private BarbershopLocation locationByInvite(String inviteCode) {

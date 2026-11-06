@@ -10,4 +10,7 @@ public interface UserRepository extends JpaRepository<User, Long> {
     Optional<User> findByEmail(String email);
     boolean existsByEmail(String email);
     Optional<User> findFirstByPhoneOrderByIdAsc(String phone);
+    // Los correos se guardan en minúsculas desde el registro; IgnoreCase cubre cuentas viejas con mayúsculas
+    Optional<User> findByEmailIgnoreCase(String email);
+    boolean existsByEmailIgnoreCase(String email);
 }

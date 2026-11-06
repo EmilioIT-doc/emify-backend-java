@@ -3,10 +3,15 @@ package com.emify.team;
 import com.emify.auth.dto.ApiResponse;
 import com.emify.common.CurrentUser;
 import com.emify.common.RequestValues;
+import com.emify.security.session.AuthEventService;
+import com.emify.security.session.SessionService;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
+import org.springframework.security.web.csrf.CsrfTokenRepository;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
@@ -18,6 +23,8 @@ import java.util.Map;
 public class TeamController {
 
     private final TeamService teamService;
+    private final SessionService sessionService;
+    private final CsrfTokenRepository csrfTokenRepository;
 
     // GET /api/team/location/{id}
     @GetMapping("/location/{id}")
@@ -66,10 +73,16 @@ public class TeamController {
 
     // POST /api/team/invite/{code}/join  (público)  body: {name, phone, email, password}
     // Crea la cuenta (o usa la que ya existe con ese correo y contraseña), la une a la sucursal
-    // y regresa un token para entrar directo a su agenda.
+    // y deja la sesión abierta (cookie HttpOnly) para entrar directo a su agenda.
     @PostMapping("/invite/{code}/join")
-    public ResponseEntity<ApiResponse<?>> joinByInvite(@PathVariable String code, @RequestBody Map<String, String> body) {
-        return ResponseEntity.ok(teamService.joinByInvite(code, body));
+    public ResponseEntity<ApiResponse<?>> joinByInvite(@PathVariable String code, @RequestBody Map<String, String> body,
+                                                       HttpServletRequest request, HttpServletResponse response) {
+        TeamService.InviteJoin joined = teamService.joinByInvite(code, body);
+        sessionService.start(joined.user(), AuthEventService.JOIN_INVITE, request, response);
+        // Token CSRF nuevo, igual que en el login
+        csrfTokenRepository.saveToken(csrfTokenRepository.generateToken(request), request, response);
+        return ResponseEntity.ok(ApiResponse.ok("Te uniste a " + joined.location().get("name"),
+                Map.of("location", joined.location())));
     }
 
     // POST /api/team/join   body: {invite_code}

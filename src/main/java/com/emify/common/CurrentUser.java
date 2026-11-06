@@ -6,7 +6,7 @@ import org.springframework.security.core.Authentication;
 
 import java.util.Optional;
 
-/** Usuario logeado (puesto por JwtFilter) a partir del Authentication del request. */
+/** Usuario logeado (puesto por SessionAuthenticationFilter a partir de la cookie de sesión). */
 public final class CurrentUser {
 
     private CurrentUser() {
